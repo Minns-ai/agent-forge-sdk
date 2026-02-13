@@ -1,0 +1,42 @@
+{
+  "name": "@minns/agentforge",
+  "version": "0.1.0",
+  "description": "Agent framework SDK powered by minns-sdk memory layer",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rimraf dist"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "minns-sdk": "0.4.2"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.20.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "rimraf": "^5.0.0",
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "license": "MIT"
+}
