@@ -1,4 +1,4 @@
-# @minns/agentforge
+# @minns/agent-forge
 
 A standalone TypeScript agent framework SDK powered by [minns-sdk](https://www.npmjs.com/package/minns-sdk) as the memory layer. Extract proven agent pipeline patterns into a reusable, framework-agnostic npm package that any Node.js app can use — no Express, MongoDB, or control plane required.
 
@@ -25,7 +25,7 @@ A standalone TypeScript agent framework SDK powered by [minns-sdk](https://www.n
 ## Installation
 
 ```bash
-npm install @minns/agentforge minns-sdk
+npm install @minns/agent-forge minns-sdk
 ```
 
 Optional — for Anthropic provider:
@@ -37,7 +37,7 @@ npm install @anthropic-ai/sdk
 ## Quick Start
 
 ```typescript
-import { AgentForge, OpenAIProvider } from "@minns/agentforge";
+import { AgentForge, OpenAIProvider } from "@minns/agent-forge";
 import { createClient } from "minns-sdk";
 
 const agent = new AgentForge({
@@ -131,7 +131,7 @@ const agent = new AgentForge({
 Works with OpenAI, Azure OpenAI, Groq, Together, OpenRouter, vLLM, Ollama, etc.
 
 ```typescript
-import { OpenAIProvider } from "@minns/agentforge";
+import { OpenAIProvider } from "@minns/agent-forge";
 
 const llm = new OpenAIProvider({
   apiKey: "sk-...",
@@ -148,7 +148,7 @@ const llm = new OpenAIProvider({
 Requires `@anthropic-ai/sdk` as a peer dependency (optional, lazy-loaded).
 
 ```typescript
-import { AnthropicProvider } from "@minns/agentforge";
+import { AnthropicProvider } from "@minns/agent-forge";
 
 const llm = new AnthropicProvider({
   apiKey: "sk-ant-...",
@@ -160,7 +160,7 @@ const llm = new AnthropicProvider({
 ## Custom Tools
 
 ```typescript
-import type { ToolDefinition } from "@minns/agentforge";
+import type { ToolDefinition } from "@minns/agent-forge";
 
 const myTool: ToolDefinition = {
   name: "lookup_inventory",
@@ -194,7 +194,7 @@ The `context` parameter gives tools access to:
 ## Custom Session Store
 
 ```typescript
-import type { SessionStore, SessionState } from "@minns/agentforge";
+import type { SessionStore, SessionState } from "@minns/agent-forge";
 
 class RedisSessionStore implements SessionStore {
   async get(key: string): Promise<SessionState | undefined> {
@@ -321,7 +321,7 @@ import {
 
   // Sub-agents
   SubAgentRunner,
-} from "@minns/agentforge";
+} from "@minns/agent-forge";
 ```
 
 ## Reasoning Configuration
@@ -415,7 +415,7 @@ Sub-agents can run in parallel via `SubAgentRunner.executeParallel()` for indepe
 ## Architecture
 
 ```
-@minns/agentforge
+@minns/agent-forge
   |
   +-- agent.ts          AgentForge class (top-level API)
   +-- types.ts          All public type definitions
