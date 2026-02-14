@@ -116,7 +116,12 @@ export type AgentEvent =
   | { type: "stream_chunk"; data: { delta: string } }
   | { type: "pipeline"; data: PipelineSummary }
   | { type: "done"; data: PipelineResult }
-  | { type: "error"; data: { error: string } };
+  | { type: "error"; data: { error: string } }
+  | { type: "complexity"; data: { level: string; score: number; reasoning: string; skipPhases: string[] } }
+  | { type: "tree_search"; data: { nodesExplored: number; llmCalls: number; bestPathLength: number } }
+  | { type: "reflexion"; data: { constraints: number; pastFailures: number; learnedLessons: number } }
+  | { type: "self_critique"; data: { approved: boolean; issues: string[]; confidence: number } }
+  | { type: "sub_agent"; data: { name: string; task: string; success: boolean; summary: string; duration_ms: number } };
 
 // ─── Pipeline ────────────────────────────────────────────────────────────────
 
@@ -154,6 +159,25 @@ export interface PipelineResult {
 
 export type GoalChecker = (state: SessionState) => GoalProgress;
 
+export interface ReasoningConfig {
+  /** Enable adaptive compute — skip phases for simple queries (default true) */
+  adaptiveCompute?: boolean;
+  /** Enable MCTS-lite tree search instead of flat action loop (default false) */
+  treeSearch?: boolean;
+  /** Tree search branching factor (default 3) */
+  branchingFactor?: number;
+  /** Tree search max depth (default 4) */
+  maxDepth?: number;
+  /** Prune threshold — min score to keep a branch (default 0.3) */
+  pruneThreshold?: number;
+  /** Enable reflexion — inject past failures as constraints (default true) */
+  reflexion?: boolean;
+  /** Enable self-critique gate before response (default false) */
+  selfCritique?: boolean;
+  /** Enable world model simulation before executing actions (default false — costs extra LLM calls) */
+  worldModel?: boolean;
+}
+
 export interface AgentForgeConfig {
   directive: Directive;
   llm: LLMProvider;
@@ -164,6 +188,10 @@ export interface AgentForgeConfig {
   goalChecker?: GoalChecker;
   /** Max conversation history entries to keep (default 20) */
   maxHistory?: number;
+  /** Reasoning engine configuration */
+  reasoning?: ReasoningConfig;
+  /** Sub-agent definitions for delegation */
+  subAgents?: import("./subagent/types.js").SubAgentDefinition[];
 }
 
 export interface RunOptions {

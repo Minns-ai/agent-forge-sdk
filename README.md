@@ -13,6 +13,15 @@ A standalone TypeScript agent framework SDK powered by [minns-sdk](https://www.n
 - **Non-fatal error handling** — Phase errors accumulate in `PipelineResult.errors[]`, never block the pipeline
 - **Full TypeScript** — Strict types, declaration maps, ESM
 
+### Advanced Reasoning (v2)
+
+- **Adaptive Compute** — Meta-reasoner classifies query complexity (trivial/simple/moderate/complex) and skips unnecessary phases for fast queries
+- **MCTS-lite Tree Search** — Monte Carlo Tree Search replaces the flat action loop for complex tasks. Expands, evaluates, simulates, selects, and reflects on action paths using UCB1 scoring
+- **Reflexion** — Extracts DO NOT / MUST DO / PREFER constraints from past failures and negative strategies, injecting learned lessons into the prompt
+- **World Model** — Simulates action outcomes before committing, predicting state transitions and risk levels. Heuristic-first with LLM fallback
+- **Self-Critique** — Validates responses before sending — checks for re-asking known facts, response quality, goal alignment. Can rewrite rejected responses
+- **Sub-Agent Delegation** — Spawn child agents with their own LLM, tools, and directive for parallel sub-task execution
+
 ## Installation
 
 ```bash
@@ -89,6 +98,29 @@ const agent = new AgentForge({
   sessionStore: new InMemorySessionStore(10_000),  // or your own SessionStore
   goalChecker: (state) => ({ completed: false, progress: 0.5 }),
   maxHistory: 20,  // conversation history cap
+
+  // Reasoning engine configuration (all optional)
+  reasoning: {
+    adaptiveCompute: true,    // skip phases for trivial queries (default: true)
+    treeSearch: false,        // use MCTS-lite instead of flat action loop (default: false)
+    branchingFactor: 3,       // tree search candidates per step (default: 3)
+    maxDepth: 4,              // tree search max depth (default: 4)
+    pruneThreshold: 0.3,      // min score to keep a branch (default: 0.3)
+    reflexion: true,          // inject past failure constraints (default: true)
+    selfCritique: false,      // validate response before sending (default: false)
+    worldModel: false,        // simulate actions before executing (default: false)
+  },
+
+  // Sub-agent definitions (optional)
+  subAgents: [
+    {
+      name: "researcher",
+      directive: { identity: "You are a research assistant", goalDescription: "Find information" },
+      tools: [/* subset of tools */],
+      llm: cheaperLlm,       // optional: use a cheaper model
+      maxSteps: 3,
+    },
+  ],
 });
 ```
 
@@ -202,22 +234,25 @@ const agent = new AgentForge({
 
 ## Execution Pipeline
 
-Each turn runs through 11 phases. Errors are accumulated, never thrown — a failed memory retrieval won't block response generation.
+Each turn runs through up to 15 phases. Errors are accumulated, never thrown — a failed memory retrieval won't block response generation. Adaptive compute can skip phases for trivial queries.
 
 ```
 Message In
   |
-  +-- 1. Intent Parse ---------- LLM + minns-sdk sidecar -> ParsedIntent
-  +-- 2. Semantic Write -------- Auto-semantic event to EventGraphDB
-  +-- 3. Memory Retrieval ------ 4 parallel minns calls + fact extraction
-  +-- 4. Strategy Fetch -------- getSimilarStrategies + getActionSuggestions
-  +-- 5. Plan Generation ------- LLM -> 2-4 step plan
-  +-- 6. Auto-Store ------------ If intent="inform" -> store fact automatically
-  +-- 7. Action Loop ----------- LLM decides tools (max N steps), execute, accumulate
-  +-- 8. Store Reasoning ------- Record reasoning steps in EventGraphDB
-  +-- 9. Goal Check ------------ goalChecker(session) -> { completed, progress }
-  +-- 10. Response Generation -- LLM with full context
-  +-- 11. Finalize ------------- Store assistant event, update history, persist session
+  +-- 1.  Intent Parse ---------- LLM + minns-sdk sidecar -> ParsedIntent
+  +-- 2.  Semantic Write -------- Auto-semantic event to EventGraphDB
+  +-- 3.  Memory Retrieval ------ 4 parallel minns calls + fact extraction
+  +-- 3b. Meta-Reasoning -------- Classify complexity, decide which phases to skip
+  +-- 3c. Reflexion ------------- Extract constraints from past failures/strategies
+  +-- 4.  Strategy Fetch -------- getSimilarStrategies + getActionSuggestions
+  +-- 5.  Plan Generation ------- LLM -> 2-4 step plan
+  +-- 6.  Auto-Store ------------ If intent="inform" -> store fact automatically
+  +-- 7.  Action Loop ----------- Tree Search (MCTS) or Flat loop with tools
+  +-- 8.  Store Reasoning ------- Record reasoning steps in EventGraphDB
+  +-- 9.  Goal Check ------------ goalChecker(session) -> { completed, progress }
+  +-- 10. Response Generation --- LLM with full context
+  +-- 10b. Self-Critique -------- Validate response, rewrite if needed
+  +-- 11. Finalize -------------- Store assistant event, update history
   |
   +-- PipelineResult Out
 ```
@@ -254,6 +289,11 @@ When using `stream()` or `runWithEvents()`, the following events are emitted:
 | `pipeline` | Full pipeline timing summary |
 | `done` | Complete PipelineResult |
 | `error` | Error event |
+| `complexity` | Adaptive compute assessment (level, score, skipped phases) |
+| `tree_search` | MCTS tree search stats (nodes explored, LLM calls, best path) |
+| `reflexion` | Reflexion constraints loaded (constraints, past failures, lessons) |
+| `self_critique` | Response validation result (approved, issues, confidence) |
+| `sub_agent` | Sub-agent execution result (name, task, success, duration) |
 
 ## Advanced: Direct Phase Access
 
@@ -261,6 +301,7 @@ For custom pipelines, individual phases are exported:
 
 ```typescript
 import {
+  // Pipeline phases
   runIntentPhase,
   runMemoryRetrievalPhase,
   runPlanPhase,
@@ -270,8 +311,106 @@ import {
   ToolRegistry,
   MemoryManager,
   selectBestContext,
+
+  // Reasoning engines
+  MetaReasoner,
+  ReflexionEngine,
+  TreeSearchEngine,
+  SelfCritique,
+  WorldModel,
+
+  // Sub-agents
+  SubAgentRunner,
 } from "@minns/agentforge";
 ```
+
+## Reasoning Configuration
+
+### Adaptive Compute
+
+When enabled (default), the meta-reasoner classifies each query's complexity and skips unnecessary pipeline phases:
+
+| Level | Example | Phases Skipped |
+|-------|---------|----------------|
+| `trivial` | "hi", "thanks" | plan, action loop, strategy, reasoning store |
+| `simple` | "what time is the movie?" | plan, action loop |
+| `moderate` | "find me an action movie tonight" | _(none)_ |
+| `complex` | "book 4 tickets, add snacks, apply a coupon" | _(none, uses tree search)_ |
+
+### Tree Search (MCTS-lite)
+
+Enable for complex multi-step tasks. Instead of a flat "pick one tool at a time" loop, the tree search:
+
+1. **Expands** — generates N candidate actions via LLM
+2. **Evaluates** — scores each with the world model (heuristic + LLM)
+3. **Selects** — picks the best using UCB1 (exploration vs exploitation)
+4. **Executes** — runs the selected tool
+5. **Reflects** — compares outcome to prediction, backtracking on failure
+
+```typescript
+const agent = new AgentForge({
+  // ...
+  reasoning: {
+    treeSearch: true,
+    branchingFactor: 3,  // 3 candidates per step
+    maxDepth: 4,         // max 4 steps deep
+    pruneThreshold: 0.3, // drop branches below 30% score
+    worldModel: true,    // simulate before executing
+  },
+});
+```
+
+### Reflexion
+
+Automatically extracts constraints from past failures stored in memory:
+
+- **DO NOT**: Actions that previously failed or led to negative outcomes
+- **MUST DO**: Required steps from high-quality strategies
+- **PREFER**: Positive patterns from successful interactions
+
+These constraints are injected into the LLM prompts during planning and action selection.
+
+### Self-Critique
+
+When enabled, validates the response before sending:
+
+1. **Heuristic checks** (no LLM call) — re-asking known facts, response length
+2. **LLM critique** — does it answer the question? move toward the goal? acknowledge the user?
+3. **Rewrite** — if rejected, the response is rewritten
+
+```typescript
+const agent = new AgentForge({
+  // ...
+  reasoning: {
+    selfCritique: true,
+  },
+});
+```
+
+### Sub-Agents
+
+Define child agents that can be delegated sub-tasks. Each sub-agent has its own directive, tool set, and optional LLM override:
+
+```typescript
+const agent = new AgentForge({
+  // ...
+  subAgents: [
+    {
+      name: "fact_checker",
+      directive: {
+        identity: "You verify facts against stored memories",
+        goalDescription: "Verify claims",
+      },
+      tools: [searchMemoriesTool],
+      llm: new OpenAIProvider({ model: "gpt-4o-mini", apiKey: "..." }), // cheaper model
+      maxSteps: 2,
+      phases: ["memory_retrieval", "action_loop"], // which phases to run
+    },
+  ],
+});
+```
+
+Sub-agents can run in parallel via `SubAgentRunner.executeParallel()` for independent tasks.
 
 ## Architecture
 
@@ -288,6 +427,8 @@ import {
   +-- memory/           MemoryManager, context ranker, fact extractors
   +-- session/          SessionStore interface + in-memory impl
   +-- pipeline/         PipelineRunner + 11 phase files
+  +-- reasoning/        MetaReasoner, Reflexion, TreeSearch, SelfCritique, WorldModel
+  +-- subagent/         SubAgentRunner + types
   +-- events/           Typed event emitter (callback + async iterable)
   +-- utils/            Timer, JSON, fingerprint utilities
 ```

@@ -23,6 +23,7 @@ export type {
   GoalProgress,
   PipelineResult,
   GoalChecker,
+  ReasoningConfig,
   AgentForgeConfig,
   RunOptions,
 } from "./types.js";
@@ -79,6 +80,36 @@ export { PipelineRunner } from "./pipeline/runner.js";
 export { PipelineTimer } from "./utils/timer.js";
 export { computeContextFingerprint } from "./utils/fingerprint.js";
 export { safeJsonParse, canonicalizeJson } from "./utils/json.js";
+
+// ─── Reasoning ──────────────────────────────────────────────────────────────
+export { MetaReasoner } from "./reasoning/meta-reasoner.js";
+export { ReflexionEngine } from "./reasoning/reflexion.js";
+export { TreeSearchEngine } from "./reasoning/tree-search.js";
+export { SelfCritique } from "./reasoning/self-critique.js";
+export { WorldModel } from "./reasoning/world-model.js";
+export type {
+  TreeNode,
+  TreeAction,
+  TreeSearchConfig,
+  TreeSearchResult,
+  ReasoningStep,
+  Scratchpad,
+  ComplexityLevel,
+  ComplexityAssessment,
+  ReflexionConstraint,
+  ReflexionContext,
+  CritiqueResult,
+  WorldState,
+  SimulationResult,
+} from "./reasoning/types.js";
+
+// ─── Sub-Agents ─────────────────────────────────────────────────────────────
+export { SubAgentRunner } from "./subagent/sub-agent.js";
+export type {
+  SubAgentDefinition,
+  SubAgentResult,
+  SubAgentTask,
+} from "./subagent/types.js";
 
 // ─── Pipeline Phases (advanced usage) ────────────────────────────────────────
 export { runIntentPhase } from "./pipeline/phases/intent-phase.js";

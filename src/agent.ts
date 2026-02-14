@@ -51,6 +51,8 @@ export class AgentForge {
       tools: allTools,
       goalChecker: config.goalChecker,
       maxHistory: config.maxHistory,
+      reasoning: config.reasoning,
+      subAgents: config.subAgents,
     });
   }
 
