@@ -38,7 +38,6 @@ npm install @anthropic-ai/sdk
 
 ```typescript
 import { AgentForge, OpenAIProvider } from "@minns/agent-forge";
-import { createClient } from "minns-sdk";
 
 const agent = new AgentForge({
   directive: {
@@ -50,7 +49,7 @@ const agent = new AgentForge({
     apiKey: process.env.OPENAI_API_KEY!,
     model: "gpt-4o-mini",
   }),
-  memory: createClient({ baseUrl: "https://your-minns-instance.com" }),
+  memoryApiKey: process.env.MINNS_API_KEY!,
   agentId: 2001,
 });
 
@@ -90,7 +89,7 @@ const agent = new AgentForge({
     maxIterations: 3,             // optional, max tool-use loop steps per turn
   },
   llm: new OpenAIProvider({ ... }),  // or AnthropicProvider
-  memory: createClient({ ... }),      // minns-sdk client
+  memoryApiKey: "your-minns-api-key", // OR pass a pre-built client via `memory`
   agentId: 1,
 
   // Optional
@@ -437,7 +436,7 @@ Sub-agents can run in parallel via `SubAgentRunner.executeParallel()` for indepe
 
 - Node.js 18+
 - TypeScript 5.0+ (for development)
-- minns-sdk 0.4.x
+- minns-sdk 0.4.4+
 - An LLM API key (OpenAI, Anthropic, or any OpenAI-compatible endpoint)
 - A running minns EventGraphDB instance
 

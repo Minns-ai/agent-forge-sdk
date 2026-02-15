@@ -13,6 +13,7 @@ import { AgentEventEmitter } from "./events/emitter.js";
 import { searchMemoriesTool } from "./tools/builtin/search-memories.js";
 import { storeFactTool } from "./tools/builtin/store-fact.js";
 import { reportFailureTool } from "./tools/builtin/report-failure.js";
+import { createClient } from "minns-sdk";
 
 const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, reportFailureTool];
 
@@ -21,10 +22,19 @@ const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, repo
  *
  * @example
  * ```ts
+ * // Option 1: Pass a memoryApiKey and let AgentForge create the client
  * const agent = new AgentForge({
  *   directive: { identity: "You are a helpful assistant", goalDescription: "Help the user" },
  *   llm: new OpenAIProvider({ apiKey: "..." }),
- *   memory: createClient({ baseUrl: "https://..." }),
+ *   memoryApiKey: "your-minns-api-key",
+ *   agentId: 1,
+ * });
+ *
+ * // Option 2: Pass a pre-built client
+ * const agent = new AgentForge({
+ *   directive: { identity: "You are a helpful assistant", goalDescription: "Help the user" },
+ *   llm: new OpenAIProvider({ apiKey: "..." }),
+ *   memory: createClient({ apiKey: "your-minns-api-key" }),
  *   agentId: 1,
  * });
  *
@@ -40,13 +50,22 @@ export class AgentForge {
     this.config = config;
     this.sessionStore = config.sessionStore ?? new InMemorySessionStore();
 
+    // Resolve the minns-sdk client: use provided client or create one from apiKey
+    const client = config.memory ?? (config.memoryApiKey
+      ? createClient(config.memoryApiKey)
+      : undefined);
+
+    if (!client) {
+      throw new Error("AgentForge requires either `memory` (a pre-built client) or `memoryApiKey` to be provided.");
+    }
+
     // Merge built-in tools with user-provided tools
     const allTools = [...BUILTIN_TOOLS, ...(config.tools ?? [])];
 
     this.runner = new PipelineRunner({
       directive: config.directive,
       llm: config.llm,
-      client: config.memory,
+      client,
       agentId: config.agentId,
       tools: allTools,
       goalChecker: config.goalChecker,

@@ -181,7 +181,10 @@ export interface ReasoningConfig {
 export interface AgentForgeConfig {
   directive: Directive;
   llm: LLMProvider;
-  memory: any; // EventGraphDBClient from minns-sdk
+  /** Pre-built EventGraphDBClient from minns-sdk. Provide this OR memoryApiKey. */
+  memory?: any;
+  /** minns-sdk API key — if provided, the client is created automatically. */
+  memoryApiKey?: string;
   agentId: number;
   tools?: ToolDefinition[];
   sessionStore?: SessionStore;
