@@ -40,6 +40,7 @@ export interface ToolContext {
   memory: MemorySnapshot;
   client: any; // EventGraphDBClient from minns-sdk
   sessionState: SessionState;
+  services: Record<string, any>;
 }
 
 // ─── LLM ─────────────────────────────────────────────────────────────────────
@@ -195,6 +196,8 @@ export interface AgentForgeConfig {
   reasoning?: ReasoningConfig;
   /** Sub-agent definitions for delegation */
   subAgents?: import("./subagent/types.js").SubAgentDefinition[];
+  /** Shared service instances accessible to all tools via context.services */
+  services?: Record<string, any>;
 }
 
 export interface RunOptions {

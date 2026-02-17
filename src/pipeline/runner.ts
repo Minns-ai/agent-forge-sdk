@@ -80,6 +80,7 @@ export class PipelineRunner {
   private treeSearch: TreeSearchEngine | null;
   private selfCritique: SelfCritique | null;
   private subAgentRunner: SubAgentRunner;
+  private services: Record<string, any>;
 
   constructor(params: {
     directive: Directive;
@@ -91,6 +92,7 @@ export class PipelineRunner {
     maxHistory?: number;
     reasoning?: ReasoningConfig;
     subAgents?: SubAgentDefinition[];
+    services?: Record<string, any>;
   }) {
     this.directive = resolveDirective(params.directive);
     this.llm = params.llm;
@@ -100,6 +102,7 @@ export class PipelineRunner {
     this.maxHistory = params.maxHistory ?? 20;
     this.reasoning = { ...DEFAULT_REASONING, ...params.reasoning };
 
+    this.services = params.services ?? {};
     this.toolRegistry = new ToolRegistry();
     this.toolRegistry.registerAll(params.tools);
 
@@ -385,6 +388,7 @@ export class PipelineRunner {
       memory: memorySnapshot,
       client: this.client,
       sessionState,
+      services: this.services,
     };
 
     if (!shouldSkip("auto_store")) {

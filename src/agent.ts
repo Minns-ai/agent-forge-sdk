@@ -72,6 +72,7 @@ export class AgentForge {
       maxHistory: config.maxHistory,
       reasoning: config.reasoning,
       subAgents: config.subAgents,
+      services: config.services,
     });
   }
 
