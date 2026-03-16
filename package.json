@@ -1,6 +1,6 @@
 {
   "name": "@minns/agent-forge",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Agent framework SDK powered by minns-sdk memory layer",
   "type": "module",
   "main": "dist/index.js",
