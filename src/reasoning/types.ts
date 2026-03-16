@@ -101,7 +101,7 @@ export interface ComplexityAssessment {
 export interface ReflexionConstraint {
   type: "avoid" | "prefer" | "require";
   description: string;
-  source: "negative_strategy" | "past_failure" | "positive_strategy";
+  source: "negative_strategy" | "past_failure" | "positive_strategy" | "negative_claim" | "preference_claim";
   confidence: number;
 }
 

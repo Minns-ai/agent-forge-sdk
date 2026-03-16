@@ -29,7 +29,6 @@ export class MetaReasoner {
     const wordCount = message.split(/\s+/).length;
     const hasFacts = Object.keys(sessionState.collectedFacts).length > 0;
     const hasClaims = memory.claims.length > 0;
-    const hasStrategies = memory.strategies.length > 0;
 
     // Trivial: greetings, single-word, simple acknowledgments
     if (wordCount <= 3 && ["query", "feedback"].includes(intent.type)) {
@@ -115,7 +114,6 @@ Intent: ${intent.type}
 Goal: ${goalDescription}
 Facts collected: ${factCount}
 Claims available: ${claimCount}
-Strategies available: ${memory.strategies.length}
 Conversation turns: ${sessionState.conversationHistory.length}`,
       },
     ];

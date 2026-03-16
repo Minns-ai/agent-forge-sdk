@@ -92,16 +92,13 @@ export class SubAgentRunner {
         const memManager = new MemoryManager(this.client);
         const memResult = await memManager.retrieve({
           query: task.task,
-          agentId: parentContext.agentId,
-          userId: parentContext.userId,
           collectedFacts: {},
         });
         memoryData = {
           claims: memResult.snapshot.claims,
-          memories: memResult.snapshot.memories,
-          strategies: memResult.snapshot.strategies,
+          queryAnswer: memResult.snapshot.queryAnswer,
         };
-        subReasoning.push(`Retrieved ${memResult.snapshot.claims.length} claims, ${memResult.snapshot.memories.length} memories`);
+        subReasoning.push(`Retrieved ${memResult.snapshot.claims.length} claims`);
       }
 
       // Phase 2: Action loop (lightweight — max N steps)

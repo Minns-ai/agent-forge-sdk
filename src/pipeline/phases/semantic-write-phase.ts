@@ -1,34 +1,25 @@
 import type { ParsedIntent } from "../../types.js";
 
 /**
- * Phase 2: Write semantic event to EventGraphDB.
- * If intent enables semantic extraction or has claims_hint, sends a context event.
+ * Phase 2: Send user message to minns for graph ingestion and claim extraction.
  */
 export async function runSemanticWritePhase(params: {
   client: any;
-  agentId: number;
   sessionId: number;
   userId?: string;
   intent: ParsedIntent;
   message: string;
 }): Promise<void> {
-  const { client, agentId, sessionId, userId, intent, message } = params;
+  const { client, sessionId, userId, intent, message } = params;
 
-  if (!intent.enable_semantic && !(intent.claims_hint?.length > 0)) {
+  if (!intent.enable_semantic) {
     return;
   }
 
-  await client
-    .event("agentforge", {
-      agentId,
-      sessionId,
-      enableSemantic: true,
-    })
-    .context(intent.rich_context || message, "semantic_extraction")
-    .state({
-      user_id: userId,
-      intent_type: intent.type,
-      claims_hint: intent.claims_hint,
-    })
-    .send();
+  await client.sendMessage({
+    role: "user",
+    content: intent.rich_context || message,
+    case_id: userId ?? "anonymous",
+    session_id: String(sessionId),
+  });
 }

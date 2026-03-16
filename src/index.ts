@@ -1,5 +1,7 @@
 // ─── Core ────────────────────────────────────────────────────────────────────
 export { AgentForge } from "./agent.js";
+export { SimpleAgent } from "./simple-agent.js";
+export type { SimpleAgentConfig } from "./simple-agent.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export type {
@@ -49,11 +51,7 @@ export { InMemorySessionStore } from "./session/in-memory-store.js";
 // ─── Memory ──────────────────────────────────────────────────────────────────
 export { MemoryManager } from "./memory/memory-manager.js";
 export { selectBestContext } from "./memory/context-ranker.js";
-export {
-  extractFactsFromClaims,
-  extractFactsFromMemories,
-  extractFactsFromClaimsHint,
-} from "./memory/fact-extractor.js";
+export { extractFactsFromClaims } from "./memory/fact-extractor.js";
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 export { ToolRegistry } from "./tools/tool-registry.js";
@@ -115,7 +113,6 @@ export type {
 export { runIntentPhase } from "./pipeline/phases/intent-phase.js";
 export { runSemanticWritePhase } from "./pipeline/phases/semantic-write-phase.js";
 export { runMemoryRetrievalPhase } from "./pipeline/phases/memory-retrieval-phase.js";
-export { runStrategyPhase } from "./pipeline/phases/strategy-phase.js";
 export { runPlanPhase } from "./pipeline/phases/plan-phase.js";
 export { runAutoStorePhase } from "./pipeline/phases/auto-store-phase.js";
 export { runActionLoopPhase } from "./pipeline/phases/action-loop-phase.js";

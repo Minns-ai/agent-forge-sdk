@@ -2,8 +2,8 @@ import type { ParsedIntent, SessionState, ToolResult, ToolContext } from "../../
 import { ToolRegistry } from "../../tools/tool-registry.js";
 
 /**
- * Phase 6: Auto-store from sidecar claims_hint.
- * If intent is "inform" and sidecar extracted key/value slots, store them automatically.
+ * Phase 6: Auto-store facts for inform intents.
+ * If intent is "inform" and LLM extracted key/value slots, store them automatically.
  */
 export async function runAutoStorePhase(params: {
   intent: ParsedIntent;
@@ -26,7 +26,6 @@ export async function runAutoStorePhase(params: {
         preference_type: key,
         preference_value: value,
         rich_context: intent.rich_context,
-        claims_hint: intent.claims_hint,
       },
       toolContext,
     );

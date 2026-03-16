@@ -1,47 +1,36 @@
 import type { ParsedIntent, SessionState } from "../../types.js";
 
 /**
- * Phase 11: Store assistant event, update conversation history, persist session.
+ * Phase 11: Store assistant response in minns, update conversation history.
  */
 export async function runFinalizePhase(params: {
   client: any;
-  agentId: number;
   sessionId: number;
   userId?: string;
   intent: ParsedIntent;
   sessionState: SessionState;
   responseMessage: string;
   message: string;
-  goalProgress: { progress: number; completed: boolean };
   maxHistory: number;
 }): Promise<void> {
   const {
     client,
-    agentId,
     sessionId,
     userId,
     intent,
     sessionState,
     responseMessage,
     message,
-    goalProgress,
     maxHistory,
   } = params;
 
-  // Store assistant event in EventGraphDB
-  await client
-    .event("agentforge", {
-      agentId,
-      sessionId,
-      enableSemantic: intent.enable_semantic,
-    })
-    .context(responseMessage, "assistant_message")
-    .state({
-      user_id: userId,
-      intent_type: intent.type,
-    })
-    .goal(sessionState.goalDescription, 5, goalProgress.progress)
-    .send();
+  // Store assistant response in minns
+  await client.sendMessage({
+    role: "assistant",
+    content: responseMessage,
+    case_id: userId ?? "anonymous",
+    session_id: String(sessionId),
+  });
 
   // Update conversation history
   sessionState.conversationHistory.push({ role: "user", content: message });

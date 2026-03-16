@@ -2,7 +2,7 @@
 
 ## Overview
 
-TypeScript agent framework SDK. ESM-only, strict TypeScript, no default exports. Powered by `minns-sdk` as the memory layer. Ships a 13-phase execution pipeline with advanced reasoning engines.
+TypeScript agent framework SDK. ESM-only, strict TypeScript, no default exports. Powered by `minns-sdk` (^0.7.2) as the memory layer. Ships a 10-phase execution pipeline with advanced reasoning engines.
 
 ## Architecture
 
@@ -24,9 +24,9 @@ src/
     types.ts            — LLM-specific types
 
   memory/
-    memory-manager.ts   — MemoryManager orchestrates 4 parallel minns-sdk calls
-    context-ranker.ts   — selectBestContext() ranks and deduplicates memory results
-    fact-extractor.ts   — extractFactsFromClaims, extractFactsFromMemories, extractFactsFromClaimsHint
+    memory-manager.ts   — MemoryManager: searchClaims + query in parallel
+    context-ranker.ts   — selectBestContext() ranks claims by confidence
+    fact-extractor.ts   — extractFactsFromClaims (subject-predicate-object → key/value)
 
   session/
     session-store.ts    — SessionStore interface
@@ -35,28 +35,27 @@ src/
   tools/
     tool-registry.ts    — ToolRegistry: register, list, execute tools
     builtin/
-      search-memories.ts  — searchMemoriesTool
-      store-fact.ts       — storeFactTool
-      report-failure.ts   — reportFailureTool
+      search-memories.ts  — searchMemoriesTool (searchClaims + query)
+      store-fact.ts       — storeFactTool (sendMessage)
+      report-failure.ts   — reportFailureTool (sendMessage)
 
   pipeline/
     runner.ts                   — PipelineRunner: orchestrates all phases
-    intent-phase.ts             — Phase 1: LLM intent classification
-    semantic-write-phase.ts     — Phase 2: Write user event to EventGraphDB
-    memory-retrieval-phase.ts   — Phase 3: 4 parallel minns-sdk calls + fact extraction
-    strategy-phase.ts           — Phase 4: Fetch strategies + action suggestions
-    plan-phase.ts               — Phase 5: LLM plan generation
-    auto-store-phase.ts         — Phase 6: Auto-store facts for inform intents
-    action-loop-phase.ts        — Phase 7: Flat tool loop or MCTS tree search
-    reasoning-phase.ts          — Phase 8: Store reasoning steps in EventGraphDB
-    goal-check-phase.ts         — Phase 9: Run goalChecker, handle completion
-    response-phase.ts           — Phase 10: LLM response generation
-    finalize-phase.ts           — Phase 11: Store assistant event, update history
+    intent-phase.ts             — Phase 1: LLM intent classification (JSON output)
+    semantic-write-phase.ts     — Phase 2: sendMessage for graph ingestion
+    memory-retrieval-phase.ts   — Phase 3: searchClaims + query in parallel
+    plan-phase.ts               — Phase 4: LLM plan generation
+    auto-store-phase.ts         — Phase 5: Auto-store facts for inform intents
+    action-loop-phase.ts        — Phase 6: Flat tool loop or MCTS tree search
+    reasoning-phase.ts          — Phase 7: Store reasoning steps via sendMessage
+    goal-check-phase.ts         — Phase 8: Run goalChecker, handle completion
+    response-phase.ts           — Phase 9: LLM response generation
+    finalize-phase.ts           — Phase 10: Store assistant message, update history
 
   reasoning/
     types.ts            — TreeNode, ComplexityAssessment, ReflexionConstraint, CritiqueResult, etc.
     meta-reasoner.ts    — MetaReasoner: classifies complexity, decides phase skipping
-    reflexion.ts        — ReflexionEngine: extracts constraints from past failures
+    reflexion.ts        — ReflexionEngine: extracts constraints from claims
     tree-search.ts      — TreeSearchEngine: MCTS-lite with UCB1 selection
     self-critique.ts    — SelfCritique: validates responses, rewrites if rejected
     world-model.ts      — WorldModel: simulates action outcomes, predicts risk
@@ -91,7 +90,7 @@ No test framework is configured yet. When adding tests, use vitest (ESM-native).
 - **No default exports** — every export is named, barrel re-exported from `src/index.ts`
 - **Error handling** — pipeline errors are non-fatal, accumulated in `PipelineResult.errors[]`. Use the error classes from `src/errors.ts` (`AgentForgeError` is the base). Never throw from a phase — catch and push to errors array
 - **Async everywhere** — all phases, tool executions, and LLM calls are async
-- **minns-sdk types** — the `EventGraphDBClient` type comes from `minns-sdk`. Memory calls use `client.getClaims()`, `client.getSimilarMemories()`, `client.getSimilarStrategies()`, `client.getActionSuggestions()`
+- **minns-sdk integration** — uses only `sendMessage()`, `searchClaims()`, `query()`, and `getClaims()`. All data ingestion goes through `sendMessage({ role, content, case_id, session_id })`. No EventBuilder, no sidecar, no raw events.
 
 ## Key Abstractions
 
@@ -103,6 +102,17 @@ No test framework is configured yet. When adding tests, use vitest (ESM-native).
 | `SessionStore` | `session/session-store.ts` | Interface: `get(key)`, `set(key, state)`, `delete(key)` |
 | `PipelineRunner` | `pipeline/runner.ts` | Orchestrates all phases, manages state, emits events |
 | `AgentForge` | `agent.ts` | Top-level API wrapping PipelineRunner with `run()`, `stream()`, `runWithEvents()` |
+
+## minns-sdk API Usage
+
+Only these minns-sdk methods are used:
+
+| Method | Purpose | Used in |
+|--------|---------|---------|
+| `createClient(apiKey)` | Initialize client | `agent.ts` |
+| `client.sendMessage({ role, content, case_id, session_id })` | Ingest messages for graph construction | semantic-write, finalize, reasoning, goal-check, store-fact, report-failure |
+| `client.searchClaims({ queryText, topK, minSimilarity })` | Semantic search over extracted claims | memory-manager, search-memories tool |
+| `client.query(question)` | Natural-language query over the graph | memory-manager, search-memories tool |
 
 ## How to Add a New Pipeline Phase
 
@@ -163,7 +173,7 @@ No test framework is configured yet. When adding tests, use vitest (ESM-native).
 
 ## Important Notes
 
-- `minns-sdk` is a runtime dependency, `@anthropic-ai/sdk` is an optional peer dependency (lazy-loaded)
+- `minns-sdk` (^0.7.2) is a runtime dependency, `@anthropic-ai/sdk` is an optional peer dependency (lazy-loaded)
 - All imports between source files use `.js` extensions (Node16 module resolution)
 - The `dist/` directory is the only thing shipped to npm (plus `.claude/` for the skill)
 - No test suite exists yet — adding one is a good first contribution

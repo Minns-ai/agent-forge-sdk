@@ -15,55 +15,6 @@ function serializeClaims(claims: any[]): string[] {
   });
 }
 
-function serializeMemories(memories: any[]): string[] {
-  return memories.map((m: any) => {
-    const parts: string[] = [];
-    if (m?.summary) parts.push(`Summary: ${m.summary}`);
-    if (m?.takeaway) parts.push(`Takeaway: ${m.takeaway}`);
-    if (m?.causal_note) parts.push(`Cause: ${m.causal_note}`);
-    if (m?.outcome) parts.push(`Outcome: ${m.outcome}`);
-    if (m?.tier) parts.push(`Tier: ${m.tier}`);
-    if (m?.strength != null) parts.push(`Strength: ${Number(m.strength).toFixed(2)}`);
-    return parts.length > 0 ? `- ${parts.join(" | ")}` : `- ${JSON.stringify(m)}`;
-  });
-}
-
-function serializeStrategy(s: any): string {
-  const lines: string[] = [];
-  const type = s?.strategy_type === "Negative" ? "[NEGATIVE] " : "";
-  lines.push(`${type}${s?.summary || s?.name || "Strategy"}`);
-  if (s?.when_to_use) lines.push(`  USE WHEN: ${s.when_to_use}`);
-  if (s?.when_not_to_use) lines.push(`  AVOID WHEN: ${s.when_not_to_use}`);
-  if (s?.precondition) lines.push(`  PRECONDITION: ${s.precondition}`);
-  if (s?.action_hint) lines.push(`  HINT: ${s.action_hint}`);
-  if (s?.playbook?.length) {
-    lines.push(`  PLAYBOOK:`);
-    for (const step of s.playbook) {
-      let stepLine = `    ${step.step}. ${step.action}`;
-      if (step.condition) stepLine += ` [if: ${step.condition}]`;
-      if (step.skip_if) stepLine += ` [skip if: ${step.skip_if}]`;
-      if (step.recovery) stepLine += ` [recovery: ${step.recovery}]`;
-      lines.push(stepLine);
-      if (step.branches?.length) {
-        for (const b of step.branches) {
-          lines.push(`       ↳ if ${b.condition}: ${b.action}`);
-        }
-      }
-    }
-  }
-  if (s?.failure_modes?.length) {
-    lines.push(`  FAILURE MODES: ${s.failure_modes.join("; ")}`);
-  }
-  if (s?.counterfactual) lines.push(`  COUNTERFACTUAL: ${s.counterfactual}`);
-  const stats: string[] = [];
-  if (s?.quality_score != null) stats.push(`quality: ${Number(s.quality_score).toFixed(2)}`);
-  if (s?.expected_success != null) stats.push(`expected success: ${Math.round(s.expected_success * 100)}%`);
-  if (s?.success_count != null) stats.push(`✓${s.success_count}`);
-  if (s?.failure_count != null) stats.push(`✗${s.failure_count}`);
-  if (stats.length) lines.push(`  [${stats.join(", ")}]`);
-  return lines.join("\n");
-}
-
 // ─── Prompt builders ─────────────────────────────────────────────────────────
 
 /**
@@ -74,10 +25,9 @@ export function buildAgentPrompt(params: {
   message: string;
   intent: ParsedIntent;
   claims: any[];
-  memories: any[];
-  strategies: any[];
   sessionState: SessionState;
   goalProgress: GoalProgress;
+  queryAnswer?: string;
   plan?: string;
   reasoning?: string[];
   toolResults?: any[];
@@ -86,24 +36,16 @@ export function buildAgentPrompt(params: {
     directive,
     message,
     claims: rawClaims,
-    memories: rawMemories,
-    strategies: rawStrategies,
     sessionState,
     goalProgress,
+    queryAnswer,
     plan,
     toolResults,
   } = params;
 
   // Rank & select best context
-  const { claims, memories, strategies } = selectBestContext({
-    claims: rawClaims,
-    memories: rawMemories,
-    strategies: rawStrategies,
-  });
-
+  const { claims } = selectBestContext({ claims: rawClaims });
   const claimLines = serializeClaims(claims);
-  const memoryLines = serializeMemories(memories);
-  const strategyLines = strategies.map(serializeStrategy);
 
   const facts = sessionState.collectedFacts ?? {};
   const factEntries = Object.entries(facts);
@@ -111,7 +53,7 @@ export function buildAgentPrompt(params: {
 
   const toolResultLines = (toolResults ?? []).map((tr: any) => {
     if (tr?.success) {
-      return `- ✓ ${tr.result?.preference_stored ? `Stored: ${tr.result.preference_type ?? "?"} = ${tr.result.preference_value ?? "?"}` : tr.result?.edit_stored ? `Edit: ${tr.result.entity ?? "?"}.${tr.result.field ?? "?"} → ${tr.result.new_value ?? "?"}` : "Tool succeeded"}`;
+      return `- ✓ ${tr.result?.preference_stored ? `Stored: ${tr.result.preference_type ?? "?"} = ${tr.result.preference_value ?? "?"}` : "Tool succeeded"}`;
     }
     return `- ✗ ${tr.error || "Tool failed"}`;
   });
@@ -122,23 +64,15 @@ WHAT WE ALREADY KNOW ABOUT THIS USER (highest confidence data — do NOT re-ask 
 
 Top claims — strongest facts from previous conversations (subject → predicate → object):
 ${claimLines.length ? claimLines.join("\n") : "No prior claims."}
-${strategies.length > 0
-    ? `\nBest strategy — the most successful learned approach (FOLLOW its playbook):\n${strategyLines.join("\n\n")}`
-    : memories.length > 0
-      ? `\nBest memories — strongest records from past interactions:\n${memoryLines.join("\n")}`
-      : "\nNo strategies or memories yet."}${strategies.length > 0 && memories.length > 0
-    ? `\nSupporting memory:\n${memoryLines.join("\n")}`
-    : ""}
+${queryAnswer ? `\nGraph knowledge:\n${queryAnswer}` : ""}
 
 Facts confirmed this session:
 ${factEntries.length ? factEntries.map(([k, v]) => `- ${k}: ${v}`).join("\n") : "None yet."}
 
 RULES:
 - If a claim says "user" → "prefers genre" → "action", the user's genre is action. Do NOT ask again.
-- If a memory takeaway mentions a preference, treat it as known.
-- If a strategy has a playbook, follow its steps.
 - If the user says "just book it" or similar, use what you have and fill reasonable defaults.
-- Only ask for information that is NOT already in claims, memories, or collected facts.
+- Only ask for information that is NOT already in claims or collected facts.
 ${toolResultLines.length ? `\nTool results this turn:\n${toolResultLines.join("\n")}` : ""}
 ${plan ? `\nCurrent plan: ${plan}` : ""}
 ${goalProgress.completed ? "\nGOAL IS COMPLETE. Summarise what was accomplished." : `\nProgress: ${Math.round(goalProgress.progress * 100)}%`}`;
@@ -199,8 +133,6 @@ export function buildNextActionPrompt(params: {
   intent: ParsedIntent;
   sessionState: SessionState;
   claims: any[];
-  strategies: any[];
-  suggestions: any[];
   goalProgress: GoalProgress;
   allowedTools: string[];
 }): { system: string; user: string } {
@@ -209,8 +141,6 @@ export function buildNextActionPrompt(params: {
     intent,
     sessionState,
     claims: rawClaims,
-    strategies: rawStrategies,
-    suggestions,
     goalProgress,
     allowedTools,
   } = params;
@@ -218,9 +148,6 @@ export function buildNextActionPrompt(params: {
   const claims = [...rawClaims]
     .sort((a, b) => (b?.confidence ?? 0) - (a?.confidence ?? 0))
     .slice(0, 5);
-  const strategies = [...rawStrategies]
-    .sort((a, b) => (b?.quality_score ?? 0) - (a?.quality_score ?? 0))
-    .slice(0, 1);
   const facts = sessionState.collectedFacts ?? {};
 
   return {
@@ -247,45 +174,37 @@ Rules:
       `Available tools: ${allowedTools.join(", ")}`,
       `Progress: ${Math.round(goalProgress.progress * 100)}%`,
       `Claims (subject→predicate→object): ${claims.length ? claims.map((c: any) => `"${c?.subject}" → "${c?.predicate}" → "${c?.object}"`).join(" | ") : "none"}`,
-      `Strategies:\n${strategies.length ? strategies.map((s: any) => {
-        const parts: string[] = [];
-        if (s?.summary) parts.push(s.summary);
-        if (s?.when_to_use) parts.push(`Use when: ${s.when_to_use}`);
-        if (s?.action_hint) parts.push(`Hint: ${s.action_hint}`);
-        if (s?.strategy_type === "Negative") parts.push("[NEGATIVE - avoid this approach]");
-        if (s?.playbook?.length) parts.push(`Playbook: ${s.playbook.map((p: any) => p?.action).filter(Boolean).join(" → ")}`);
-        return parts.join(" | ") || JSON.stringify(s);
-      }).join("\n") : "none"}`,
-      `Action suggestions: ${suggestions.length ? suggestions.slice(0, 2).map((s: any) => `${s?.action_name ?? s?.action ?? "?"} (${s?.success_probability != null ? Math.round(s.success_probability * 100) + "% success" : "?"}, evidence: ${s?.evidence_count ?? "?"} episodes, reason: ${s?.reasoning ?? "none"})`).join(" | ") : "none"}`,
       `Facts confirmed this session: ${JSON.stringify(facts)}`,
-      `Sidecar-extracted slots: ${JSON.stringify(intent?.details ?? {})}`,
+      `Extracted slots: ${JSON.stringify(intent?.details ?? {})}`,
     ].join("\n"),
   };
 }
 
 /**
- * Build intent-parsing prompt for sidecar.
+ * Build intent-parsing prompt.
  */
 export function buildIntentParsePrompt(params: {
   message: string;
   directive: Directive;
   sessionState: SessionState;
-  sidecarInstruction: string;
 }): { system: string; user: string } {
-  const { message, directive, sessionState, sidecarInstruction } = params;
+  const { message, directive, sessionState } = params;
   const domain = directive.domain ?? "generic";
 
   const system = `You are an intent parser for a ${domain} assistant.
-Parse the user's message and extract:
-1. The intent: inform (user sharing info/preferences), book (user wants to proceed/finalize), edit (document edit), query (question), feedback, failure
-2. Slots: key = category of info, value = what they said
-3. claims_hint: factual statements to remember long-term
+Parse the user's message and respond with JSON only:
+{
+  "intent": "inform" | "book" | "edit" | "query" | "feedback" | "failure",
+  "slots": { "key": "<category>", "value": "<info>" },
+  "rich_context": "<original message with context>",
+  "enable_semantic": true | false
+}
 
-Important:
-- If the user shares ANY preference or fact, use intent "inform" with key/value.
+Rules:
+- If the user shares ANY preference or fact, use intent "inform" with key/value slots.
 - If the user says "book", "let's go", "proceed", "confirm", use intent "book".
-- Extract claims_hint for every factual statement.
-Follow the sidecar format exactly.`;
+- "edit" for document/entity edits, "query" for questions, "feedback" for sentiment, "failure" for errors.
+- enable_semantic should be true for inform, book, and edit intents.`;
 
   const recentHistory = (sessionState.conversationHistory ?? [])
     .slice(-4)
@@ -296,9 +215,7 @@ Follow the sidecar format exactly.`;
 Goal: ${directive.goalDescription}
 Facts collected so far: ${JSON.stringify(sessionState.collectedFacts ?? {})}
 ${recentHistory ? `Recent conversation:\n${recentHistory}\n` : ""}
-User message: "${message}"
-
-${sidecarInstruction}`;
+User message: "${message}"`;
 
   return { system, user };
 }

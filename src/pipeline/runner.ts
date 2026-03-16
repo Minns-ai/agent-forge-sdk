@@ -14,17 +14,14 @@ import type {
 import type { SubAgentDefinition } from "../subagent/types.js";
 import { resolveDirective } from "../directive/directive.js";
 import { PipelineTimer } from "../utils/timer.js";
-import { computeContextFingerprint } from "../utils/fingerprint.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { selectBestContext } from "../memory/context-ranker.js";
-import { extractFactsFromClaimsHint } from "../memory/fact-extractor.js";
 import { AgentEventEmitter } from "../events/emitter.js";
 
 // Phase imports
 import { runIntentPhase } from "./phases/intent-phase.js";
 import { runSemanticWritePhase } from "./phases/semantic-write-phase.js";
 import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
-import { runStrategyPhase } from "./phases/strategy-phase.js";
 import { runPlanPhase } from "./phases/plan-phase.js";
 import { runAutoStorePhase } from "./phases/auto-store-phase.js";
 import { runActionLoopPhase } from "./phases/action-loop-phase.js";
@@ -56,13 +53,6 @@ const DEFAULT_REASONING: Required<ReasoningConfig> = {
 
 /**
  * PipelineRunner — orchestrates all pipeline phases with advanced reasoning.
- *
- * New in v2:
- * - Adaptive compute: skips phases for trivial queries
- * - MCTS-lite tree search: replaces flat action loop
- * - Reflexion: injects past failures as constraints
- * - Self-critique: validates response before sending
- * - Sub-agents: delegates complex sub-tasks
  */
 export class PipelineRunner {
   private directive: Required<Directive>;
@@ -163,7 +153,6 @@ export class PipelineRunner {
         type: "query" as const,
         details: { raw_message: message },
         enable_semantic: false,
-        claims_hint: [] as any[],
         rich_context: message,
       };
     }
@@ -171,18 +160,17 @@ export class PipelineRunner {
     emit({ type: "phase", data: intentPhase });
     emit({ type: "intent", data: { intent_type: intent.type } });
 
-    // ── 2. Semantic Write ─────────────────────────────────────────────────
+    // ── 2. Semantic Write (sendMessage) ───────────────────────────────────
     timer.startPhase("minns_semantic_write");
     try {
       await runSemanticWritePhase({
         client: this.client,
-        agentId: this.agentId,
         sessionId,
         userId,
         intent,
         message,
       });
-      const semPhase = timer.endPhase("Stored context with semantic extraction");
+      const semPhase = timer.endPhase("Sent message for ingestion");
       emit({ type: "phase", data: semPhase });
     } catch (err: any) {
       const semPhase = timer.endPhase("Failed");
@@ -190,15 +178,13 @@ export class PipelineRunner {
       errors.push(err?.message || "Semantic write failed");
     }
 
-    // ── 3. Memory Retrieval ───────────────────────────────────────────────
+    // ── 3. Memory Retrieval (searchClaims + query) ────────────────────────
     timer.startPhase("minns_search");
-    let memorySnapshot: MemorySnapshot = { claims: [], memories: [], strategies: [], actionSuggestions: [] };
+    let memorySnapshot: MemorySnapshot = { claims: [] };
     try {
       const memResult = await runMemoryRetrievalPhase({
         client: this.client,
         message,
-        agentId: this.agentId,
-        userId,
         sessionState,
       });
       memorySnapshot = memResult.snapshot;
@@ -207,39 +193,31 @@ export class PipelineRunner {
         emit({ type: "phase", data: t });
       }
 
-      const selected = selectBestContext({
-        claims: memorySnapshot.claims,
-        memories: memorySnapshot.memories,
-        strategies: memorySnapshot.strategies,
-      });
+      const selected = selectBestContext({ claims: memorySnapshot.claims });
       emit({
         type: "retrieval",
         data: {
-          memories: memorySnapshot.memories.slice(0, 5),
+          memories: [],
           claims: memorySnapshot.claims.slice(0, 10),
-          strategies: memorySnapshot.strategies.slice(0, 5),
+          strategies: [],
           totals: {
-            memories: memorySnapshot.memories.length,
+            memories: 0,
             claims: memorySnapshot.claims.length,
-            strategies: memorySnapshot.strategies.length,
+            strategies: 0,
           },
           using: {
-            memories: selected.memories.length,
+            memories: 0,
             claims: selected.claims.length,
-            strategies: selected.strategies.length,
+            strategies: 0,
           },
         },
       });
     } catch (err: any) {
       errors.push(err?.message || "Memory retrieval failed");
     }
-    timer.endPhase(`${memorySnapshot.claims.length} claims, ${memorySnapshot.memories.length} memories`);
+    timer.endPhase(`${memorySnapshot.claims.length} claims`);
 
-    if (intent.claims_hint?.length > 0) {
-      extractFactsFromClaimsHint(intent.claims_hint, sessionState.collectedFacts);
-    }
-
-    // ── NEW: Adaptive Compute (Meta-Reasoner) ─────────────────────────────
+    // ── Adaptive Compute (Meta-Reasoner) ──────────────────────────────────
     let complexity: ComplexityAssessment | null = null;
     if (this.reasoning.adaptiveCompute) {
       timer.startPhase("meta_reasoning");
@@ -271,7 +249,7 @@ export class PipelineRunner {
 
     const shouldSkip = (phase: string) => complexity?.skipPhases.includes(phase) ?? false;
 
-    // ── NEW: Reflexion (load constraints from past failures) ──────────────
+    // ── Reflexion (load constraints from past failures) ────────────────────
     let reflexionContext: ReflexionContext = { constraints: [], pastFailures: [], learnedLessons: [] };
     if (this.reasoning.reflexion) {
       timer.startPhase("reflexion");
@@ -300,39 +278,6 @@ export class PipelineRunner {
       }
     }
 
-    // ── 4. Strategy Fetch ─────────────────────────────────────────────────
-    if (!shouldSkip("strategy_fetch")) {
-      try {
-        const ctxHash = computeContextFingerprint({
-          environment: {
-            variables: {
-              user_id: userId ?? "anonymous",
-              intent_type: intent.type,
-              facts: sessionState.collectedFacts ?? {},
-              claims_count: memorySnapshot.claims.length,
-            },
-          },
-          active_goals: [],
-          resources: { external: {} },
-        });
-
-        const stratResult = await runStrategyPhase({
-          client: this.client,
-          agentId: this.agentId,
-          contextHash: Number(ctxHash),
-          existingStrategies: memorySnapshot.strategies,
-        });
-        memorySnapshot.strategies = stratResult.strategies;
-        memorySnapshot.actionSuggestions = stratResult.actionSuggestions;
-        for (const t of stratResult.timings) {
-          timer.addPhase(t);
-          emit({ type: "phase", data: t });
-        }
-      } catch (err: any) {
-        errors.push(err?.message || "Strategy fetch failed");
-      }
-    }
-
     // ── 5. Plan Generation ────────────────────────────────────────────────
     let planText = "";
     if (!shouldSkip("plan_generation")) {
@@ -348,17 +293,14 @@ export class PipelineRunner {
         });
         allReasoning.push(`Plan: ${planText}`);
 
+        // Store plan as a message
         await this.client
-          .event("agentforge", {
-            agentId: this.agentId,
-            sessionId,
-            enableSemantic: intent.enable_semantic,
+          .sendMessage({
+            role: "assistant",
+            content: `[Plan] ${planText}`,
+            case_id: userId ?? "anonymous",
+            session_id: String(sessionId),
           })
-          .action("cognitive_plan", { plan: planText })
-          .outcome({ created: true })
-          .state({ user_id: userId, intent_type: intent.type })
-          .goal(sessionState.goalDescription, 5, 0)
-          .send()
           .catch(() => {});
       } catch (err: any) {
         errors.push(err?.message || "Plan generation failed");
@@ -421,9 +363,6 @@ export class PipelineRunner {
             intent,
             sessionState,
             claims: memorySnapshot.claims,
-            memories: memorySnapshot.memories,
-            strategies: memorySnapshot.strategies,
-            actionSuggestions: memorySnapshot.actionSuggestions,
             reflexion: reflexionContext,
             toolRegistry: this.toolRegistry,
             toolContext,
@@ -467,7 +406,7 @@ export class PipelineRunner {
           errors.push(err?.message || "Tree search failed");
         }
       } else {
-        // ── Flat Action Loop (original behavior) ─────────────────────────
+        // ── Flat Action Loop ─────────────────────────────────────────────
         try {
           const actionResult = await runActionLoopPhase({
             directive: this.directive,
@@ -475,9 +414,6 @@ export class PipelineRunner {
             intent,
             sessionState,
             claims: memorySnapshot.claims,
-            memories: memorySnapshot.memories,
-            strategies: memorySnapshot.strategies,
-            actionSuggestions: memorySnapshot.actionSuggestions,
             toolRegistry: this.toolRegistry,
             toolContext,
             goalChecker: this.goalChecker,
@@ -486,7 +422,6 @@ export class PipelineRunner {
           allToolResults.push(...actionResult.toolResults);
           allReasoning.push(...actionResult.reasoning);
           memorySnapshot.claims = actionResult.claims;
-          memorySnapshot.memories = actionResult.memories;
 
           const actionPhase = timer.endPhase(
             actionResult.actionSummaries.length > 0
@@ -523,10 +458,8 @@ export class PipelineRunner {
       try {
         await runReasoningPhase({
           client: this.client,
-          agentId: this.agentId,
           sessionId,
           userId,
-          intent,
           reasoningSteps: allReasoning,
         });
       } catch (err: any) {
@@ -542,7 +475,6 @@ export class PipelineRunner {
 
       await handleGoalCompletion({
         client: this.client,
-        agentId: this.agentId,
         sessionId,
         userId,
         intent,
@@ -563,10 +495,9 @@ export class PipelineRunner {
         message,
         intent,
         claims: memorySnapshot.claims,
-        memories: memorySnapshot.memories,
-        strategies: memorySnapshot.strategies,
         sessionState,
         goalProgress,
+        queryAnswer: memorySnapshot.queryAnswer,
         plan: planText,
         reasoning: allReasoning,
         toolResults: allToolResults,
@@ -580,7 +511,7 @@ export class PipelineRunner {
     );
     emit({ type: "phase", data: respPhase });
 
-    // ── NEW: Self-Critique Gate ───────────────────────────────────────────
+    // ── Self-Critique Gate ─────────────────────────────────────────────────
     if (this.selfCritique && responseMessage) {
       timer.startPhase("self_critique");
       try {
@@ -628,14 +559,12 @@ export class PipelineRunner {
     try {
       await runFinalizePhase({
         client: this.client,
-        agentId: this.agentId,
         sessionId,
         userId,
         intent,
         sessionState,
         responseMessage,
         message,
-        goalProgress,
         maxHistory: this.maxHistory,
       });
     } catch (err: any) {

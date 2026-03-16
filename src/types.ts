@@ -90,9 +90,8 @@ export interface SessionStore {
 
 export interface MemorySnapshot {
   claims: any[];
-  memories: any[];
-  strategies: any[];
-  actionSuggestions: any[];
+  /** Natural-language answer from minns-sdk query() */
+  queryAnswer?: string;
 }
 
 // ─── Intent ──────────────────────────────────────────────────────────────────
@@ -101,7 +100,6 @@ export interface ParsedIntent {
   type: string;
   details: Record<string, any> & { raw_message: string };
   enable_semantic: boolean;
-  claims_hint: any[];
   rich_context: string;
 }
 

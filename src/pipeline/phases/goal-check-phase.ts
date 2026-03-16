@@ -22,28 +22,26 @@ export function defaultGoalChecker(state: SessionState): GoalProgress {
 }
 
 /**
- * Handle goal completion events — store goal_completed in EventGraphDB.
+ * Handle goal completion — store event via sendMessage.
  */
 export async function handleGoalCompletion(params: {
   client: any;
-  agentId: number;
   sessionId: number;
   userId?: string;
   intent: ParsedIntent;
   sessionState: SessionState;
   goalProgress: GoalProgress;
 }): Promise<void> {
-  const { client, agentId, sessionId, userId, intent, sessionState, goalProgress } = params;
+  const { client, sessionId, userId, intent, sessionState, goalProgress } = params;
 
   // Handle "book" intent → goal action
   if (intent.type === "book" && !sessionState.goalCompletedAt) {
-    await client
-      .event("agentforge", { agentId, sessionId, enableSemantic: true })
-      .action("goal_action", { action: "book", facts: sessionState.collectedFacts })
-      .outcome({ success: true })
-      .state({ user_id: userId })
-      .goal(sessionState.goalDescription, 5, 1)
-      .send();
+    await client.sendMessage({
+      role: "assistant",
+      content: `[Goal Action] book — facts: ${JSON.stringify(sessionState.collectedFacts)}`,
+      case_id: userId ?? "anonymous",
+      session_id: String(sessionId),
+    });
     sessionState.goalCompleted = true;
     sessionState.goalCompletedAt = Date.now();
     return;
@@ -51,13 +49,12 @@ export async function handleGoalCompletion(params: {
 
   // Handle generic goal completion
   if (goalProgress.completed && !sessionState.goalCompletedAt) {
-    await client
-      .event("agentforge", { agentId, sessionId })
-      .action("goal_completed", { goal: sessionState.goalDescription, progress: goalProgress.progress })
-      .outcome({ success: true })
-      .state({ user_id: userId })
-      .goal(sessionState.goalDescription, 5, 1)
-      .send();
+    await client.sendMessage({
+      role: "assistant",
+      content: `[Goal Completed] ${sessionState.goalDescription} — progress: ${goalProgress.progress}`,
+      case_id: userId ?? "anonymous",
+      session_id: String(sessionId),
+    });
     sessionState.goalCompletedAt = Date.now();
   }
 }

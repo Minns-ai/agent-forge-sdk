@@ -17,7 +17,7 @@ import type {
   Scratchpad,
   ReasoningStep,
 } from "./types.js";
-import { ToolRegistry, extractSuggestedTool } from "../tools/tool-registry.js";
+import { ToolRegistry } from "../tools/tool-registry.js";
 import { WorldModel } from "./world-model.js";
 import { safeJsonParse } from "../utils/json.js";
 import { extractFactsFromClaims } from "../memory/fact-extractor.js";
@@ -68,9 +68,6 @@ export class TreeSearchEngine {
     intent: ParsedIntent;
     sessionState: SessionState;
     claims: any[];
-    memories: any[];
-    strategies: any[];
-    actionSuggestions: any[];
     reflexion: ReflexionContext;
     toolRegistry: ToolRegistry;
     toolContext: ToolContext;
@@ -80,14 +77,12 @@ export class TreeSearchEngine {
       directive,
       intent,
       sessionState,
-      strategies,
-      actionSuggestions,
       reflexion,
       toolRegistry,
       toolContext,
       goalChecker,
     } = params;
-    let { claims, memories } = params;
+    let { claims } = params;
 
     this.tree.clear();
     this.llmCallCount = 0;
@@ -135,8 +130,6 @@ export class TreeSearchEngine {
         intent,
         sessionState,
         claims,
-        strategies,
-        actionSuggestions,
         reflexion,
         scratchpad,
         allowedTools,
@@ -214,7 +207,6 @@ export class TreeSearchEngine {
           if (pt && pv) sessionState.collectedFacts[pt] = pv;
         } else if (toolName === "search_memories" && result.success && result.result) {
           claims = [...claims, ...(result.result.claims ?? [])];
-          memories = [...memories, ...(result.result.memories ?? [])];
           extractFactsFromClaims(result.result.claims ?? [], sessionState.collectedFacts);
         }
 
@@ -280,8 +272,6 @@ export class TreeSearchEngine {
     intent: ParsedIntent;
     sessionState: SessionState;
     claims: any[];
-    strategies: any[];
-    actionSuggestions: any[];
     reflexion: ReflexionContext;
     scratchpad: Scratchpad;
     allowedTools: string[];
@@ -292,8 +282,6 @@ export class TreeSearchEngine {
       intent,
       sessionState,
       claims,
-      strategies,
-      actionSuggestions,
       reflexion,
       scratchpad,
       allowedTools,
@@ -349,8 +337,6 @@ Claims: ${claims.slice(0, 3).map((c: any) => `"${c?.subject}" → "${c?.predicat
 
 Scratchpad:
 ${scratchpadText}
-
-Action suggestions: ${actionSuggestions.slice(0, 2).map((s: any) => s?.action_name ?? s?.action ?? "?").join(", ") || "none"}
 
 Generate exactly ${this.config.branchingFactor} diverse candidates:`,
       },
@@ -522,13 +508,11 @@ Goal progress: ${Math.round(goalProgress.progress * 100)}%`,
         preference_type: llmParams.preference_type ?? intent.details?.key,
         preference_value: llmParams.preference_value ?? intent.details?.value,
         rich_context: llmParams.rich_context ?? intent.rich_context,
-        claims_hint: intent.claims_hint,
       };
     }
     if (toolName === "search_memories") {
       return {
         query: llmParams.query ?? intent.details?.raw_message,
-        user_id: toolContext.userId,
       };
     }
     if (toolName === "report_failure") {

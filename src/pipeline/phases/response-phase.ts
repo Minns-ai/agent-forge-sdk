@@ -17,10 +17,9 @@ export async function runResponsePhase(params: {
   message: string;
   intent: ParsedIntent;
   claims: any[];
-  memories: any[];
-  strategies: any[];
   sessionState: SessionState;
   goalProgress: GoalProgress;
+  queryAnswer?: string;
   plan?: string;
   reasoning?: string[];
   toolResults?: ToolResult[];

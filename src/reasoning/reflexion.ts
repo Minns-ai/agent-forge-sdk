@@ -2,86 +2,46 @@ import type { MemorySnapshot } from "../types.js";
 import type { ReflexionConstraint, ReflexionContext } from "./types.js";
 
 /**
- * Reflexion — extract constraints from past strategies and failures.
+ * Reflexion — extract constraints from past claims.
  *
- * Feeds negative strategies and past failures into the reasoning loop
- * as "DO NOT" constraints, preventing the agent from repeating mistakes.
+ * Scans claims for negative patterns and failure signals,
+ * preventing the agent from repeating mistakes.
  */
 export class ReflexionEngine {
   /**
    * Build reflexion context from memory snapshot.
-   * Extracts actionable constraints from strategies and memory.
+   * Extracts actionable constraints from claims.
    */
   buildContext(memory: MemorySnapshot): ReflexionContext {
     const constraints: ReflexionConstraint[] = [];
     const pastFailures: string[] = [];
     const learnedLessons: string[] = [];
 
-    // Extract constraints from negative strategies
-    for (const strategy of memory.strategies) {
-      if (strategy?.strategy_type === "Negative") {
+    // Extract constraints from claims with negative predicates
+    for (const claim of memory.claims) {
+      const predicate = claim?.predicate ?? "";
+      const obj = claim?.object ?? "";
+      const confidence = claim?.confidence ?? 0.5;
+
+      // Detect negative/avoidance claims
+      if (/dislikes|hates|avoid|reject|fail/i.test(predicate)) {
         constraints.push({
           type: "avoid",
-          description: strategy.summary || strategy.name || "Unknown negative strategy",
-          source: "negative_strategy",
-          confidence: strategy.quality_score ?? 0.5,
+          description: `${predicate}: ${obj}`,
+          source: "negative_claim",
+          confidence,
         });
-
-        if (strategy.failure_modes?.length) {
-          for (const mode of strategy.failure_modes) {
-            pastFailures.push(mode);
-          }
-        }
-        if (strategy.counterfactual) {
-          learnedLessons.push(`Instead of failing: ${strategy.counterfactual}`);
-        }
-        if (strategy.when_not_to_use) {
-          constraints.push({
-            type: "avoid",
-            description: `DO NOT use when: ${strategy.when_not_to_use}`,
-            source: "negative_strategy",
-            confidence: strategy.quality_score ?? 0.5,
-          });
-        }
+        pastFailures.push(`${predicate}: ${obj}`);
       }
 
-      // Extract positive strategy hints
-      if (strategy?.strategy_type !== "Negative" && strategy?.when_to_use) {
+      // Detect preference claims as soft constraints
+      if (/prefers|likes|wants|needs/i.test(predicate)) {
         constraints.push({
           type: "prefer",
-          description: strategy.when_to_use,
-          source: "positive_strategy",
-          confidence: strategy.quality_score ?? 0.5,
+          description: `${predicate}: ${obj}`,
+          source: "preference_claim",
+          confidence,
         });
-        if (strategy.action_hint) {
-          learnedLessons.push(strategy.action_hint);
-        }
-      }
-
-      // Playbook steps become "require" constraints for high-quality strategies
-      if (strategy?.playbook?.length && (strategy.quality_score ?? 0) > 0.7) {
-        constraints.push({
-          type: "require",
-          description: `Follow playbook: ${strategy.playbook.map((s: any) => s.action).filter(Boolean).join(" → ")}`,
-          source: "positive_strategy",
-          confidence: strategy.quality_score ?? 0.5,
-        });
-      }
-    }
-
-    // Extract lessons from memories with negative outcomes
-    for (const mem of memory.memories) {
-      if (mem?.outcome && /fail|error|wrong|bad/i.test(JSON.stringify(mem.outcome))) {
-        const lesson = mem.takeaway || mem.causal_note || mem.summary;
-        if (lesson) {
-          pastFailures.push(lesson);
-          constraints.push({
-            type: "avoid",
-            description: lesson,
-            source: "past_failure",
-            confidence: mem.strength ?? 0.3,
-          });
-        }
       }
     }
 

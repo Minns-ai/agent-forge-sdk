@@ -14,6 +14,7 @@ import { searchMemoriesTool } from "./tools/builtin/search-memories.js";
 import { storeFactTool } from "./tools/builtin/store-fact.js";
 import { reportFailureTool } from "./tools/builtin/report-failure.js";
 import { createClient } from "minns-sdk";
+import { SimpleAgent } from "./simple-agent.js";
 
 const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, reportFailureTool];
 
@@ -50,7 +51,7 @@ export class AgentForge {
     this.config = config;
     this.sessionStore = config.sessionStore ?? new InMemorySessionStore();
 
-    // Resolve the minns-sdk client: use provided client or create one from apiKey
+    // Resolve the minns-sdk client: use provided client or create from apiKey
     const client = config.memory ?? (config.memoryApiKey
       ? createClient(config.memoryApiKey)
       : undefined);
@@ -150,6 +151,23 @@ export class AgentForge {
     await this.sessionStore!.set(sessionKey, sessionState);
 
     return result;
+  }
+
+  /**
+   * Run a lightweight ReAct loop — no memory, no intent parsing, no plan generation.
+   * Just: system prompt → tool loop → done. Uses only the LLM and tools from config.
+   */
+  async runSimple(task: string, options?: { maxIterations?: number }): Promise<PipelineResult> {
+    const simple = new SimpleAgent({
+      directive: {
+        identity: this.config.directive.identity,
+        goalDescription: this.config.directive.goalDescription,
+        maxIterations: options?.maxIterations ?? this.config.directive.maxIterations,
+      },
+      llm: this.config.llm,
+      tools: this.config.tools ?? [],
+    });
+    return simple.run(task);
   }
 
   private getSessionKey(options: RunOptions): string {

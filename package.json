@@ -24,7 +24,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "minns-sdk": "^0.4.4"
+    "minns-sdk": "^0.7.2"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.20.0"
