@@ -2,6 +2,7 @@ import type { ParsedIntent } from "../../types.js";
 
 /**
  * Phase 2: Send user message to minns for graph ingestion and claim extraction.
+ * Skips gracefully when no minns client is configured.
  */
 export async function runSemanticWritePhase(params: {
   client: any;
@@ -12,7 +13,8 @@ export async function runSemanticWritePhase(params: {
 }): Promise<void> {
   const { client, sessionId, userId, intent, message } = params;
 
-  if (!intent.enable_semantic) {
+  // Skip if minns is not active or intent doesn't need semantic processing
+  if (!client || !intent.enable_semantic) {
     return;
   }
 

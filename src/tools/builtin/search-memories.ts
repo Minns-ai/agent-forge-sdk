@@ -14,21 +14,45 @@ export const searchMemoriesTool: ToolDefinition = {
       const { client } = context;
       const timings: Array<{ call: string; duration_ms: number; count: number }> = [];
 
-      // 1. Search claims (semantic search)
+      // 1. Search — try hybrid first (BM25 + semantic), fall back to searchClaims
       const t0_claims = performance.now();
-      const claimsResponse = await client.searchClaims({
-        queryText: params.query,
-        topK: 15,
-        minSimilarity: 0.3,
-      });
-      // Flatten grouped results
-      const allClaims = Array.isArray(claimsResponse)
-        ? claimsResponse
-        : Array.isArray(claimsResponse?.results)
-          ? claimsResponse.results.flatMap((r: any) => r?.claims ?? [r])
-          : [];
+      let allClaims: any[] = [];
+      let searchMode = "searchClaims";
+
+      if (typeof client.search === "function") {
+        try {
+          const hybridResponse = await client.search({
+            query: params.query,
+            mode: "hybrid",
+            limit: 15,
+            fusion_strategy: "RRF",
+          });
+          const results: any[] = hybridResponse?.results ?? [];
+          if (results.length > 0) {
+            allClaims = results;
+            searchMode = "hybrid";
+          }
+        } catch {
+          // Fall through to searchClaims
+        }
+      }
+
+      if (allClaims.length === 0) {
+        const claimsResponse = await client.searchClaims({
+          queryText: params.query,
+          topK: 15,
+          minSimilarity: 0.3,
+        });
+        // ClaimSearchResponse: { groups: [{ subject, claims }], ungrouped: ClaimResponse[], total_results }
+        allClaims = Array.isArray(claimsResponse)
+          ? claimsResponse
+          : [
+              ...(claimsResponse?.groups ?? []).flatMap((g: any) => g?.claims ?? []),
+              ...(claimsResponse?.ungrouped ?? []),
+            ];
+      }
       timings.push({
-        call: "minns_search_claims",
+        call: "minns_search_" + searchMode,
         duration_ms: Math.round(performance.now() - t0_claims),
         count: allClaims.length,
       });

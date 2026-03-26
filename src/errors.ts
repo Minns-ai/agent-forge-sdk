@@ -45,6 +45,14 @@ export class PipelinePhaseError extends AgentForgeError {
   }
 }
 
+/** Error during graph compilation or execution */
+export class GraphError extends AgentForgeError {
+  constructor(message: string, phase?: string) {
+    super(message, phase ?? "graph");
+    this.name = "GraphError";
+  }
+}
+
 /** Format any error into a structured object */
 export function formatError(error: unknown): { message: string; status?: number; body?: any } {
   if (error instanceof LLMError) {

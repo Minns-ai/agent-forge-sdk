@@ -3,7 +3,10 @@
     "allow": [
       "Bash(npm run build:*)",
       "Bash(npm pack:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(source .env)",
+      "Bash(npx tsx:*)"
     ]
   }
 }

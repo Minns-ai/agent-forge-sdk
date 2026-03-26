@@ -46,14 +46,23 @@ export interface ToolContext {
 // ─── LLM ─────────────────────────────────────────────────────────────────────
 
 export interface LLMMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Tool call ID — required when role is "tool" (tool result message) */
+  toolCallId?: string;
+  /** Tool calls made by the assistant — present in assistant messages */
+  toolCalls?: LLMToolCall[];
 }
 
 export interface LLMCompletionOptions {
   temperature?: number;
   maxTokens?: number;
   stop?: string[];
+  /**
+   * Metadata passed through the middleware chain.
+   * Providers can read this for caching hints, tool configs, etc.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export interface LLMStreamChunk {
@@ -61,11 +70,99 @@ export interface LLMStreamChunk {
   done: boolean;
 }
 
+// ─── Native Tool Calling ─────────────────────────────────────────────────────
+
+/**
+ * Tool definition for native LLM tool calling (OpenAI/Anthropic format).
+ * Distinct from ToolDefinition — this describes the tool schema for the LLM,
+ * not the execution function.
+ */
+export interface LLMToolSpec {
+  /** Tool name (must match a registered ToolDefinition.name) */
+  name: string;
+  /** Human-readable description of what the tool does */
+  description: string;
+  /** JSON Schema for the tool's parameters */
+  parameters: {
+    type: "object";
+    properties: Record<string, {
+      type: string;
+      description?: string;
+      enum?: string[];
+    }>;
+    required?: string[];
+  };
+}
+
+/**
+ * A tool call requested by the LLM.
+ */
+export interface LLMToolCall {
+  /** Unique ID for this tool call (used to match with tool results) */
+  id: string;
+  /** Name of the tool to execute */
+  name: string;
+  /** Parsed arguments for the tool */
+  arguments: Record<string, any>;
+}
+
+/**
+ * Response from an LLM that may include tool calls.
+ */
+export interface LLMToolResponse {
+  /** Text content (may be null if the LLM only produced tool calls) */
+  content: string | null;
+  /** Tool calls requested by the LLM */
+  toolCalls: LLMToolCall[];
+  /** Why the LLM stopped generating */
+  stopReason: "end_turn" | "tool_use" | "max_tokens";
+}
+
 export interface LLMProvider {
-  /** Non-streaming completion */
+  /** Non-streaming completion — returns raw text */
   complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<string>;
   /** Streaming completion — yields deltas */
   stream(messages: LLMMessage[], options?: LLMCompletionOptions): AsyncGenerator<LLMStreamChunk>;
+
+  /**
+   * Native tool calling — sends tool specs to the LLM and returns
+   * structured tool calls instead of raw text.
+   *
+   * Optional: providers that don't support native tool calling can omit this.
+   * When absent, the action loop falls back to JSON parsing from complete().
+   */
+  completeWithTools?(
+    messages: LLMMessage[],
+    tools: LLMToolSpec[],
+    options?: LLMCompletionOptions,
+  ): Promise<LLMToolResponse>;
+}
+
+// ─── Intent State ─────────────────────────────────────────────────────────────
+
+/**
+ * Persistent intent tracking across turns and compactions.
+ *
+ * Research shows intent reconstruction outperforms both summarization
+ * and memory recall for multi-turn coherence (73.9 vs 54.7 vs 56.5).
+ * This state survives compaction because it lives in PipelineState/SessionState,
+ * not in messages.
+ */
+export interface IntentState {
+  /** The user's top-level goal */
+  currentGoal: string;
+  /** Active sub-goals being worked on */
+  subGoals: Array<{ description: string; status: "pending" | "in_progress" | "completed" }>;
+  /** Constraints the user has stated */
+  openConstraints: string[];
+  /** Information slots we still need to fill */
+  unresolvedSlots: string[];
+  /** How the intent has evolved across turns */
+  intentHistory: Array<{ intent: string; turn: number; summary: string }>;
+  /** Most recent intent shift description */
+  lastIntentShift?: string;
+  /** Turn number when IntentState was last updated */
+  lastUpdatedAt: number;
 }
 
 // ─── Session ─────────────────────────────────────────────────────────────────
@@ -77,6 +174,8 @@ export interface SessionState {
   collectedFacts: Record<string, any>;
   conversationHistory: Array<{ role: string; content: string }>;
   goalDescription: string;
+  /** Persistent intent tracking — survives compaction */
+  intentState?: IntentState;
   [key: string]: any; // allow domain-specific extensions
 }
 
@@ -120,7 +219,13 @@ export type AgentEvent =
   | { type: "tree_search"; data: { nodesExplored: number; llmCalls: number; bestPathLength: number } }
   | { type: "reflexion"; data: { constraints: number; pastFailures: number; learnedLessons: number } }
   | { type: "self_critique"; data: { approved: boolean; issues: string[]; confidence: number } }
-  | { type: "sub_agent"; data: { name: string; task: string; success: boolean; summary: string; duration_ms: number } };
+  | { type: "sub_agent"; data: { name: string; task: string; success: boolean; summary: string; duration_ms: number } }
+  | { type: "middleware"; data: { middleware: string; hook: "beforeExecute" | "afterExecute" | "wrapModelCall"; duration_ms: number; summary: string } }
+  | { type: "context_summarized"; data: { originalTokens: number; summarizedTokens: number; messagesEvicted: number } }
+  | { type: "prompt_cache"; data: { hit: boolean; cachedTokens: number } }
+  | { type: "hitl_interrupt"; data: { toolName: string; params: Record<string, unknown>; description: string } }
+  | { type: "hitl_decision"; data: { toolName: string; decision: "approve" | "reject" | "edit" } }
+  | { type: "todo_update"; data: { action: "create" | "update" | "complete"; items: number; summary: string } };
 
 // ─── Pipeline ────────────────────────────────────────────────────────────────
 
@@ -180,9 +285,18 @@ export interface ReasoningConfig {
 export interface AgentForgeConfig {
   directive: Directive;
   llm: LLMProvider;
-  /** Pre-built EventGraphDBClient from minns-sdk. Provide this OR memoryApiKey. */
+  /**
+   * Memory provider — any object implementing sendMessage(), searchClaims(), query().
+   *
+   * Options:
+   * - minns-sdk client: `createClient("api-key")` — graph-native memory
+   * - InMemoryProvider: ephemeral, for testing
+   * - FileMemory: filesystem-based (AGENTS.md pattern)
+   * - Custom: any object with the 3 methods
+   * - Omit entirely: agent works without memory
+   */
   memory?: any;
-  /** minns-sdk API key — if provided, the client is created automatically. */
+  /** minns-sdk API key — convenience shorthand that creates a minns client. */
   memoryApiKey?: string;
   agentId: number;
   tools?: ToolDefinition[];
@@ -196,6 +310,25 @@ export interface AgentForgeConfig {
   subAgents?: import("./subagent/types.js").SubAgentDefinition[];
   /** Shared service instances accessible to all tools via context.services */
   services?: Record<string, any>;
+  /**
+   * Middleware stack — composable units that intercept and modify agent behavior.
+   *
+   * Middlewares are processed in order:
+   * - beforeExecute: first middleware runs first
+   * - wrapModelCall: first middleware is outermost wrapper
+   * - afterExecute: runs in reverse order
+   * - modifySystemPrompt: applied in order
+   *
+   * Example:
+   * ```ts
+   * middleware: [
+   *   new ContextSummarizationMiddleware({ tokenBudget: 100000 }),
+   *   new TodoListMiddleware(),
+   *   new PromptCacheMiddleware(),
+   * ]
+   * ```
+   */
+  middleware?: import("./middleware/types.js").Middleware[];
 }
 
 export interface RunOptions {

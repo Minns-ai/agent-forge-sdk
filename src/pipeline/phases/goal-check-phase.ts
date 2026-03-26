@@ -22,7 +22,14 @@ export function defaultGoalChecker(state: SessionState): GoalProgress {
 }
 
 /**
- * Handle goal completion — store event via sendMessage.
+ * Handle goal completion — update local session state.
+ *
+ * Previously wrote goal events via sendMessage() which polluted
+ * the conversation graph with agent metadata. Goal state is now
+ * tracked only in sessionState (persisted via SessionStore).
+ *
+ * To persist goal events in minns, use MinnsGraphObserver which
+ * writes structured concept nodes via importGraph().
  */
 export async function handleGoalCompletion(params: {
   client: any;
@@ -32,16 +39,10 @@ export async function handleGoalCompletion(params: {
   sessionState: SessionState;
   goalProgress: GoalProgress;
 }): Promise<void> {
-  const { client, sessionId, userId, intent, sessionState, goalProgress } = params;
+  const { intent, sessionState, goalProgress } = params;
 
-  // Handle "book" intent → goal action
+  // Handle "book" intent → goal completed
   if (intent.type === "book" && !sessionState.goalCompletedAt) {
-    await client.sendMessage({
-      role: "assistant",
-      content: `[Goal Action] book — facts: ${JSON.stringify(sessionState.collectedFacts)}`,
-      case_id: userId ?? "anonymous",
-      session_id: String(sessionId),
-    });
     sessionState.goalCompleted = true;
     sessionState.goalCompletedAt = Date.now();
     return;
@@ -49,12 +50,6 @@ export async function handleGoalCompletion(params: {
 
   // Handle generic goal completion
   if (goalProgress.completed && !sessionState.goalCompletedAt) {
-    await client.sendMessage({
-      role: "assistant",
-      content: `[Goal Completed] ${sessionState.goalDescription} — progress: ${goalProgress.progress}`,
-      case_id: userId ?? "anonymous",
-      session_id: String(sessionId),
-    });
     sessionState.goalCompletedAt = Date.now();
   }
 }

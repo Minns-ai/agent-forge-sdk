@@ -7,13 +7,15 @@ import type {
   SessionState,
   ToolDefinition,
 } from "./types.js";
+import type { MemoryIntegration } from "./memory/provider.js";
 import { InMemorySessionStore } from "./session/in-memory-store.js";
 import { PipelineRunner } from "./pipeline/runner.js";
 import { AgentEventEmitter } from "./events/emitter.js";
 import { searchMemoriesTool } from "./tools/builtin/search-memories.js";
 import { storeFactTool } from "./tools/builtin/store-fact.js";
 import { reportFailureTool } from "./tools/builtin/report-failure.js";
-import { createClient } from "minns-sdk";
+import { MinnsMemory } from "./memory/provider.js";
+import { isMemoryIntegration, isLegacyClient, wrapLegacyClient } from "./memory/adapter.js";
 import { SimpleAgent } from "./simple-agent.js";
 
 const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, reportFailureTool];
@@ -23,19 +25,27 @@ const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, repo
  *
  * @example
  * ```ts
- * // Option 1: Pass a memoryApiKey and let AgentForge create the client
+ * // With minns (full graph-native memory)
+ * import { createClient } from "minns-sdk";
  * const agent = new AgentForge({
  *   directive: { identity: "You are a helpful assistant", goalDescription: "Help the user" },
  *   llm: new OpenAIProvider({ apiKey: "..." }),
- *   memoryApiKey: "your-minns-api-key",
+ *   memory: new MinnsMemory({ client: createClient("your-key") }),
  *   agentId: 1,
  * });
  *
- * // Option 2: Pass a pre-built client
+ * // With file-based memory (AGENTS.md pattern)
  * const agent = new AgentForge({
- *   directive: { identity: "You are a helpful assistant", goalDescription: "Help the user" },
+ *   directive: { identity: "...", goalDescription: "..." },
+ *   llm: new AnthropicProvider({ apiKey: "..." }),
+ *   memory: new FileMemory({ backend: new FilesystemBackend({ rootDir: "." }), paths: ["./AGENTS.md"] }),
+ *   agentId: 1,
+ * });
+ *
+ * // No memory — agent works, just no cross-session recall
+ * const agent = new AgentForge({
+ *   directive: { identity: "...", goalDescription: "..." },
  *   llm: new OpenAIProvider({ apiKey: "..." }),
- *   memory: createClient({ apiKey: "your-minns-api-key" }),
  *   agentId: 1,
  * });
  *
@@ -51,22 +61,52 @@ export class AgentForge {
     this.config = config;
     this.sessionStore = config.sessionStore ?? new InMemorySessionStore();
 
-    // Resolve the minns-sdk client: use provided client or create from apiKey
-    const client = config.memory ?? (config.memoryApiKey
-      ? createClient(config.memoryApiKey)
-      : undefined);
+    // ── Resolve memory provider ─────────────────────────────────────────
+    // Priority:
+    // 1. config.memory as MemoryIntegration (new API)
+    // 2. config.memory as raw minns-sdk client (legacy — auto-wrapped)
+    // 3. config.memoryApiKey → create minns client → wrap
+    // 4. null → no memory, pipeline skips memory phases
+    let memoryProvider: MemoryIntegration | null = null;
+    let legacyClient: any = null;
 
-    if (!client) {
-      throw new Error("AgentForge requires either `memory` (a pre-built client) or `memoryApiKey` to be provided.");
+    if (config.memory) {
+      if (isMemoryIntegration(config.memory)) {
+        // New API: MemoryIntegration (MinnsMemory, FileMemory, custom)
+        memoryProvider = config.memory;
+        // If it's a MinnsMemory, extract the raw client for built-in tools
+        // that still use the legacy client.sendMessage() pattern
+        legacyClient = (config.memory as any).client ?? null;
+      } else if (isLegacyClient(config.memory)) {
+        // Legacy: raw minns-sdk client
+        memoryProvider = wrapLegacyClient(config.memory);
+        legacyClient = config.memory;
+      }
+    } else if (config.memoryApiKey) {
+      // Convenience: create minns client from API key
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { createClient } = require("minns-sdk");
+        const client = createClient(config.memoryApiKey);
+        memoryProvider = new MinnsMemory({ client });
+        legacyClient = client;
+      } catch {
+        // minns-sdk not installed — continue without memory
+      }
     }
 
-    // Merge built-in tools with user-provided tools
-    const allTools = [...BUILTIN_TOOLS, ...(config.tools ?? [])];
+    // Only include memory-dependent built-in tools when memory is active
+    // AND we have a legacy client (built-in tools use client.sendMessage directly)
+    const allTools = [
+      ...(legacyClient ? BUILTIN_TOOLS : []),
+      ...(config.tools ?? []),
+    ];
 
     this.runner = new PipelineRunner({
       directive: config.directive,
       llm: config.llm,
-      client,
+      client: legacyClient,
+      memoryProvider,
       agentId: config.agentId,
       tools: allTools,
       goalChecker: config.goalChecker,
@@ -74,6 +114,7 @@ export class AgentForge {
       reasoning: config.reasoning,
       subAgents: config.subAgents,
       services: config.services,
+      middleware: config.middleware,
     });
   }
 
@@ -188,3 +229,4 @@ export class AgentForge {
     };
   }
 }
+

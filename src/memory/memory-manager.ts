@@ -39,12 +39,19 @@ export class MemoryManager {
     let allClaims: any[] = [];
     if (claimsResult.status === "fulfilled") {
       const response = claimsResult.value;
-      // searchClaims returns grouped results; flatten to claim list
-      allClaims = Array.isArray(response)
-        ? response
-        : Array.isArray(response?.results)
-          ? response.results.flatMap((r: any) => r?.claims ?? [r])
-          : [];
+      if (Array.isArray(response)) {
+        // Hybrid search returns SearchResult[] — normalize to claim-like shape
+        allClaims = response.map((r: any) => r?.properties
+          ? { ...r.properties, confidence: r.score ?? r.properties?.confidence, node_id: r.node_id }
+          : r,
+        );
+      } else {
+        // ClaimSearchResponse: { groups: [{ subject, claims }], ungrouped: ClaimResponse[], total_results }
+        allClaims = [
+          ...(response?.groups ?? []).flatMap((g: any) => g?.claims ?? []),
+          ...(response?.ungrouped ?? []),
+        ];
+      }
     }
     timings.push({
       phase: "minns_search_claims",
@@ -55,7 +62,8 @@ export class MemoryManager {
     // Process query answer
     let queryAnswer: string | undefined;
     if (queryResult.status === "fulfilled" && queryResult.value) {
-      queryAnswer = queryResult.value?.answer ?? queryResult.value;
+      const val = queryResult.value;
+      queryAnswer = val?.answer ?? (typeof val === "string" ? val : undefined);
     }
     timings.push({
       phase: "minns_query",
@@ -76,6 +84,22 @@ export class MemoryManager {
   }
 
   private async searchClaims(query: string): Promise<any> {
+    // Try hybrid search first (BM25 + semantic + RRF fusion) — better recall
+    if (typeof this.client.search === "function") {
+      try {
+        const response = await this.client.search({
+          query,
+          mode: "hybrid",
+          limit: 15,
+          fusion_strategy: "RRF",
+        });
+        const results: any[] = response?.results ?? [];
+        if (results.length > 0) return results;
+      } catch {
+        // Fall through to searchClaims
+      }
+    }
+
     return this.client.searchClaims({
       queryText: query,
       topK: 15,

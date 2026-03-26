@@ -12,6 +12,13 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  /** Replace an existing tool definition (used by HITL middleware to wrap tools) */
+  replace(name: string, tool: ToolDefinition): boolean {
+    if (!this.tools.has(name)) return false;
+    this.tools.set(name, tool);
+    return true;
+  }
+
   /** Register multiple tools */
   registerAll(tools: ToolDefinition[]): void {
     for (const tool of tools) {

@@ -1,7 +1,7 @@
 import type { ParsedIntent, SessionState } from "../../types.js";
 
 /**
- * Phase 11: Store assistant response in minns, update conversation history.
+ * Phase 11: Store assistant response in minns (if active), update conversation history.
  */
 export async function runFinalizePhase(params: {
   client: any;
@@ -17,22 +17,23 @@ export async function runFinalizePhase(params: {
     client,
     sessionId,
     userId,
-    intent,
     sessionState,
     responseMessage,
     message,
     maxHistory,
   } = params;
 
-  // Store assistant response in minns
-  await client.sendMessage({
-    role: "assistant",
-    content: responseMessage,
-    case_id: userId ?? "anonymous",
-    session_id: String(sessionId),
-  });
+  // Store assistant response in minns (if active)
+  if (client) {
+    await client.sendMessage({
+      role: "assistant",
+      content: responseMessage,
+      case_id: userId ?? "anonymous",
+      session_id: String(sessionId),
+    });
+  }
 
-  // Update conversation history
+  // Update local conversation history (always — works without minns)
   sessionState.conversationHistory.push({ role: "user", content: message });
   sessionState.conversationHistory.push({ role: "assistant", content: responseMessage });
 

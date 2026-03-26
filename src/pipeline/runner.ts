@@ -12,14 +12,21 @@ import type {
   ReasoningConfig,
 } from "../types.js";
 import type { SubAgentDefinition } from "../subagent/types.js";
+import type {
+  Middleware,
+  MiddlewareContext,
+  PipelineState,
+  NextFn,
+} from "../middleware/types.js";
 import { resolveDirective } from "../directive/directive.js";
 import { PipelineTimer } from "../utils/timer.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { selectBestContext } from "../memory/context-ranker.js";
 import { AgentEventEmitter } from "../events/emitter.js";
+import { MiddlewareStack } from "../middleware/stack.js";
 
 // Phase imports
-import { runIntentPhase } from "./phases/intent-phase.js";
+import { runIntentPhase, applyIntentUpdate, createDefaultIntentState } from "./phases/intent-phase.js";
 import { runSemanticWritePhase } from "./phases/semantic-write-phase.js";
 import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
 import { runPlanPhase } from "./phases/plan-phase.js";
@@ -52,7 +59,15 @@ const DEFAULT_REASONING: Required<ReasoningConfig> = {
 };
 
 /**
- * PipelineRunner — orchestrates all pipeline phases with advanced reasoning.
+ * PipelineRunner — orchestrates all pipeline phases with advanced reasoning
+ * and a composable middleware stack.
+ *
+ * The middleware stack intercepts at three points:
+ * 1. beforeExecute — before the pipeline starts (load state, inject context)
+ * 2. wrapModelCall — around every LLM call (prompt modification, caching, summarization)
+ * 3. afterExecute — after the pipeline completes (cleanup, persistence, metrics)
+ *
+ * When no middleware is configured, behavior is identical to the non-middleware path.
  */
 export class PipelineRunner {
   private directive: Required<Directive>;
@@ -72,10 +87,16 @@ export class PipelineRunner {
   private subAgentRunner: SubAgentRunner;
   private services: Record<string, any>;
 
+  // Middleware
+  private middlewareStack: MiddlewareStack;
+
   constructor(params: {
     directive: Directive;
     llm: LLMProvider;
+    /** Legacy minns-sdk client (used by built-in tools and phases) */
     client: any;
+    /** New MemoryIntegration provider (optional) */
+    memoryProvider?: import("../memory/provider.js").MemoryIntegration | null;
     agentId: number;
     tools: ToolDefinition[];
     goalChecker?: GoalChecker;
@@ -83,6 +104,7 @@ export class PipelineRunner {
     reasoning?: ReasoningConfig;
     subAgents?: SubAgentDefinition[];
     services?: Record<string, any>;
+    middleware?: Middleware[];
   }) {
     this.directive = resolveDirective(params.directive);
     this.llm = params.llm;
@@ -95,6 +117,17 @@ export class PipelineRunner {
     this.services = params.services ?? {};
     this.toolRegistry = new ToolRegistry();
     this.toolRegistry.registerAll(params.tools);
+
+    // Initialize middleware stack
+    this.middlewareStack = new MiddlewareStack();
+    if (params.middleware?.length) {
+      this.middlewareStack.useAll(params.middleware);
+      // Register tools contributed by middlewares
+      const middlewareTools = this.middlewareStack.collectTools();
+      if (middlewareTools.length > 0) {
+        this.toolRegistry.registerAll(middlewareTools);
+      }
+    }
 
     // Initialize reasoning engines
     this.metaReasoner = new MetaReasoner(params.llm);
@@ -137,16 +170,108 @@ export class PipelineRunner {
     // Update iteration count
     sessionState.iterationCount = (sessionState.iterationCount || 0) + 1;
 
-    // ── 1. Intent Parse ───────────────────────────────────────────────────
+    // ── Initialize or restore IntentState ───────────────────────────────
+    if (!sessionState.intentState) {
+      sessionState.intentState = createDefaultIntentState(this.directive.goalDescription);
+    }
+
+    // ── Build PipelineState for middleware ────────────────────────────────
+    const pipelineState: PipelineState = {
+      message,
+      sessionId,
+      userId,
+      intent: {
+        type: "query",
+        details: { raw_message: message },
+        enable_semantic: false,
+        rich_context: message,
+      },
+      intentState: sessionState.intentState,
+      sessionState,
+      memory: { claims: [] },
+      plan: "",
+      reasoning: allReasoning,
+      toolResults: allToolResults,
+      errors,
+      goalProgress: { completed: false, progress: 0 },
+      responseMessage: "",
+      complexity: null,
+      reflexionContext: { constraints: [], pastFailures: [], learnedLessons: [] },
+      toolContext: {
+        agentId: this.agentId,
+        sessionId,
+        userId,
+        memory: { claims: [] },
+        client: this.client,
+        sessionState,
+        services: this.services,
+      },
+      middlewareState: {},
+    };
+
+    // ── Build MiddlewareContext ───────────────────────────────────────────
+    // We build modelCall as a lazy reference so context can be created before
+    // the modelCall function (which needs context) is fully constructed.
+    let modelCallFn: NextFn = async (req) => {
+      const content = await this.llm.complete(req.messages, req.options);
+      return { content, metadata: {} };
+    };
+
+    const middlewareContext: MiddlewareContext = {
+      directive: this.directive,
+      llm: this.llm,
+      client: this.client,
+      agentId: this.agentId,
+      toolRegistry: this.toolRegistry,
+      emitter: emitter ?? new AgentEventEmitter(),
+      services: this.services,
+      timer,
+      get modelCall() {
+        return modelCallFn;
+      },
+    };
+
+    // Build the middleware-wrapped model call function
+    if (!this.middlewareStack.isEmpty) {
+      modelCallFn = this.middlewareStack.buildModelCall(
+        this.llm,
+        pipelineState,
+        middlewareContext,
+      );
+    }
+
+    // ── Middleware: beforeExecute ─────────────────────────────────────────
+    if (!this.middlewareStack.isEmpty) {
+      try {
+        await this.middlewareStack.runBeforeExecute(pipelineState, middlewareContext);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`Middleware beforeExecute failed: ${msg}`);
+      }
+    }
+
+    // ── 1. Intent Parse + IntentState Update ─────────────────────────────
     timer.startPhase("intent_parse");
-    let intent;
+    let intent = pipelineState.intent;
     try {
-      intent = await runIntentPhase({
+      const intentResult = await runIntentPhase({
         message,
         directive: this.directive,
         llm: this.llm,
         sessionState,
+        modelCall: !this.middlewareStack.isEmpty ? modelCallFn : undefined,
       });
+      intent = intentResult.parsed;
+      pipelineState.intent = intent;
+
+      // Apply intent update to persistent IntentState
+      if (intentResult.intentUpdate) {
+        pipelineState.intentState = applyIntentUpdate(
+          pipelineState.intentState,
+          intentResult.intentUpdate,
+        );
+        sessionState.intentState = pipelineState.intentState;
+      }
     } catch (err: any) {
       errors.push(err?.message || "Intent parsing failed");
       intent = {
@@ -155,6 +280,7 @@ export class PipelineRunner {
         enable_semantic: false,
         rich_context: message,
       };
+      pipelineState.intent = intent;
     }
     const intentPhase = timer.endPhase(`Classified as "${intent.type}"`);
     emit({ type: "phase", data: intentPhase });
@@ -188,6 +314,9 @@ export class PipelineRunner {
         sessionState,
       });
       memorySnapshot = memResult.snapshot;
+      pipelineState.memory = memorySnapshot;
+      pipelineState.toolContext.memory = memorySnapshot;
+
       for (const t of memResult.timings) {
         timer.addPhase(t);
         emit({ type: "phase", data: t });
@@ -229,6 +358,8 @@ export class PipelineRunner {
           memory: memorySnapshot,
           goalDescription: this.directive.goalDescription,
         });
+        pipelineState.complexity = complexity;
+
         const metaPhase = timer.endPhase(`${complexity.level} (score: ${complexity.score.toFixed(2)})`);
         emit({ type: "phase", data: metaPhase });
         emit({
@@ -255,6 +386,8 @@ export class PipelineRunner {
       timer.startPhase("reflexion");
       try {
         reflexionContext = this.reflexionEngine.buildContext(memorySnapshot);
+        pipelineState.reflexionContext = reflexionContext;
+
         const refPhase = timer.endPhase(
           `${reflexionContext.constraints.length} constraints, ${reflexionContext.pastFailures.length} failures`,
         );
@@ -290,18 +423,10 @@ export class PipelineRunner {
           intent,
           sessionState,
           claims: memorySnapshot.claims,
+          modelCall: !this.middlewareStack.isEmpty ? modelCallFn : undefined,
         });
+        pipelineState.plan = planText;
         allReasoning.push(`Plan: ${planText}`);
-
-        // Store plan as a message
-        await this.client
-          .sendMessage({
-            role: "assistant",
-            content: `[Plan] ${planText}`,
-            case_id: userId ?? "anonymous",
-            session_id: String(sessionId),
-          })
-          .catch(() => {});
       } catch (err: any) {
         errors.push(err?.message || "Plan generation failed");
       }
@@ -323,15 +448,7 @@ export class PipelineRunner {
     });
 
     // ── 6. Auto-Store ─────────────────────────────────────────────────────
-    const toolContext: ToolContext = {
-      agentId: this.agentId,
-      sessionId,
-      userId,
-      memory: memorySnapshot,
-      client: this.client,
-      sessionState,
-      services: this.services,
-    };
+    const toolContext: ToolContext = pipelineState.toolContext;
 
     if (!shouldSkip("auto_store")) {
       try {
@@ -418,10 +535,12 @@ export class PipelineRunner {
             toolContext,
             goalChecker: this.goalChecker,
             maxSteps: this.directive.maxIterations,
+            modelCall: !this.middlewareStack.isEmpty ? modelCallFn : undefined,
           });
           allToolResults.push(...actionResult.toolResults);
           allReasoning.push(...actionResult.reasoning);
           memorySnapshot.claims = actionResult.claims;
+          pipelineState.memory = memorySnapshot;
 
           const actionPhase = timer.endPhase(
             actionResult.actionSummaries.length > 0
@@ -472,6 +591,7 @@ export class PipelineRunner {
     try {
       goalProgress = this.goalChecker(sessionState);
       sessionState.goalCompleted = goalProgress.completed;
+      pipelineState.goalProgress = goalProgress;
 
       await handleGoalCompletion({
         client: this.client,
@@ -501,10 +621,13 @@ export class PipelineRunner {
         plan: planText,
         reasoning: allReasoning,
         toolResults: allToolResults,
+        modelCall: !this.middlewareStack.isEmpty ? modelCallFn : undefined,
       });
+      pipelineState.responseMessage = responseMessage;
     } catch (err: any) {
       errors.push(err?.message || "Response generation failed");
       responseMessage = "I can help with that. What details should I focus on?";
+      pipelineState.responseMessage = responseMessage;
     }
     const respPhase = timer.endPhase(
       responseMessage ? `${responseMessage.length} chars` : "Failed",
@@ -536,6 +659,7 @@ export class PipelineRunner {
         if (!critique.approved && critique.rewrittenResponse) {
           allReasoning.push(`Self-critique rejected: ${critique.issues.join("; ")}`);
           responseMessage = critique.rewrittenResponse;
+          pipelineState.responseMessage = responseMessage;
           allReasoning.push(`Response rewritten by self-critique`);
         } else if (critique.issues.length > 0) {
           allReasoning.push(`Self-critique warnings: ${critique.issues.join("; ")}`);
@@ -555,6 +679,16 @@ export class PipelineRunner {
 
     emit({ type: "message", data: { message: responseMessage } });
 
+    // ── Middleware: afterExecute ──────────────────────────────────────────
+    if (!this.middlewareStack.isEmpty) {
+      try {
+        await this.middlewareStack.runAfterExecute(pipelineState, middlewareContext);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`Middleware afterExecute failed: ${msg}`);
+      }
+    }
+
     // ── 11. Finalize ──────────────────────────────────────────────────────
     try {
       await runFinalizePhase({
@@ -563,7 +697,7 @@ export class PipelineRunner {
         userId,
         intent,
         sessionState,
-        responseMessage,
+        responseMessage: pipelineState.responseMessage,
         message,
         maxHistory: this.maxHistory,
       });
@@ -577,7 +711,7 @@ export class PipelineRunner {
 
     const result: PipelineResult = {
       success: true,
-      message: responseMessage,
+      message: pipelineState.responseMessage,
       intent,
       memory: memorySnapshot,
       goalProgress,
