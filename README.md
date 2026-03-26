@@ -51,7 +51,7 @@ Most agent frameworks give you a prompt loop and call it a day. agent-forge give
 - **Composable middleware** that controls every aspect of the pipeline without touching core code
 - **Five reasoning engines** including MCTS tree search and world model simulation
 
-You can use all of this, or just the parts you need. An agent with no memory and no middleware still works — it's just a prompt + tool loop.
+You can use all of this, or just the parts you need. An agent with no memory and no middleware still works - it's just a prompt + tool loop.
 
 ---
 
@@ -117,7 +117,7 @@ const agent = new AgentForge({
 // Agent searches the web, stores findings in AGENTS.md, recalls them next session
 await agent.run("Research the latest developments in WebAssembly GC", { sessionId: 1 });
 
-// Next day — agent reads AGENTS.md and picks up where it left off
+// Next day - agent reads AGENTS.md and picks up where it left off
 await agent.run("What did we find about WasmGC yesterday?", { sessionId: 2 });
 ```
 
@@ -219,7 +219,7 @@ await support.run("I ordered a blue jacket last week but got a red one", { sessi
 // Agent uses: refundTool → initiates replacement
 // Memory stores: "customer-42 received wrong color jacket, replacement initiated for order #8891"
 
-// Later conversation — agent remembers everything
+// Later conversation - agent remembers everything
 await support.run("Did my replacement ship yet?", { sessionId: 2, userId: "customer-42" });
 // Agent recalls the replacement from the previous session automatically
 ```
@@ -292,7 +292,7 @@ import { MultiAgentMiddleware } from "@minns/agent-forge";
 
 const client = createClient(process.env.MINNS_KEY!);
 
-// Terminal 1 — backend agent
+// Terminal 1 - backend agent
 const backend = new AgentForge({
   directive: {
     identity: "You are a backend engineer. You write APIs, database schemas, and server logic.",
@@ -311,7 +311,7 @@ const backend = new AgentForge({
   ],
 });
 
-// Terminal 2 — frontend agent
+// Terminal 2 - frontend agent
 const frontend = new AgentForge({
   directive: {
     identity: "You are a frontend engineer. You build React components and handle client-side logic.",
@@ -378,7 +378,7 @@ const r1 = await deployPipeline.invoke(
   { service: "auth-service", plan: "", tests_passed: false, approved: false, deployed: false },
   { threadId: "deploy-42" },
 );
-// r1.status === "interrupted" — tests passed, waiting for approval
+// r1.status === "interrupted" - tests passed, waiting for approval
 
 console.log(r1.state.plan);     // "Deploy auth-service: run tests → build image → ..."
 console.log(r1.state.tests_passed); // true
@@ -479,8 +479,8 @@ The pipeline is wrapped by a composable middleware stack. Middleware can interce
 
 Two execution modes:
 
-- **`agent.run(message, options)`** — full 10-phase pipeline
-- **`agent.runSimple(task)`** — lightweight ReAct loop (system prompt + tool loop), no memory or intent parsing
+- **`agent.run(message, options)`** - full 10-phase pipeline
+- **`agent.runSimple(task)`** - lightweight ReAct loop (system prompt + tool loop), no memory or intent parsing
 
 ---
 
@@ -489,7 +489,7 @@ Two execution modes:
 Memory is pluggable. Three built-in options:
 
 ```typescript
-// 1. minns — graph-native memory with hybrid search, NLQ, claim extraction, temporal tables
+// 1. minns - graph-native memory with hybrid search, NLQ, claim extraction, temporal tables
 import { MinnsMemory } from "@minns/agent-forge";
 import { createClient } from "minns-sdk";
 const agent = new AgentForge({
@@ -497,7 +497,7 @@ const agent = new AgentForge({
   // ...
 });
 
-// 2. File-based — reads/writes markdown files, keyword search
+// 2. File-based - reads/writes markdown files, keyword search
 import { FileMemory, FilesystemBackend } from "@minns/agent-forge";
 const agent = new AgentForge({
   memory: new FileMemory({
@@ -507,7 +507,7 @@ const agent = new AgentForge({
   // ...
 });
 
-// 3. No memory — agent works, just no cross-session recall
+// 3. No memory - agent works, just no cross-session recall
 const agent = new AgentForge({ /* directive + llm only */ });
 ```
 
@@ -556,9 +556,11 @@ const agent = new AgentForge({
 
 ## MinnsFullPowerMiddleware
 
-<img src="assets/minnsFish.png" alt="MinnsDB" width="80" />
+<p align="center">
+  <img src="assets/minnsFish.png" alt="MinnsDB" width="200" />
+</p>
 
-> **MinnsDB is entirely optional.** agent-forge works without it — see the examples above using `FileMemory`, `TodoListMiddleware`, or no memory at all. Add MinnsFullPowerMiddleware when you want graph-native memory, temporal tables, MinnsQL, and reactive subscriptions.
+> **MinnsDB is entirely optional.** agent-forge works without it - see the examples above using `FileMemory`, `TodoListMiddleware`, or no memory at all. Add MinnsFullPowerMiddleware when you want graph-native memory, temporal tables, MinnsQL, and reactive subscriptions.
 
 Unleashes the full minns-sdk data layer as agent tools. Pick the tool sets you need:
 
@@ -576,7 +578,7 @@ new MinnsFullPowerMiddleware({
 
 ### Temporal Tables (`"tables"`)
 
-Bi-temporal relational tables with automatic version history. Every update creates a new version — old versions remain queryable via point-in-time queries. `NodeRef` columns link rows directly to graph nodes.
+Bi-temporal relational tables with automatic version history. Every update creates a new version - old versions remain queryable via point-in-time queries. `NodeRef` columns link rows directly to graph nodes.
 
 | Tool | Description |
 |------|-------------|
@@ -666,12 +668,12 @@ const pipeline = new AgentGraph<ResearchState>()
 ```
 
 **Features:**
-- **Parallel execution** — `addParallelEdge("start", ["a", "b", "c"], "join")`
-- **Subgraph composition** — `addSubgraph("research", compiledGraph, { mapInput, mapOutput })`
-- **State reducers** — `appendReducer`, `counterReducer`, `mergeReducer`, `unionReducer`
-- **Checkpointing** — `InMemoryCheckpointer` or `MinnsCheckpointer` for graph-persisted state
-- **Human-in-the-loop** — `interruptBefore: ["deploy"]` pauses for approval
-- **Streaming** — `graph.stream(input)` yields events as nodes execute
+- **Parallel execution** - `addParallelEdge("start", ["a", "b", "c"], "join")`
+- **Subgraph composition** - `addSubgraph("research", compiledGraph, { mapInput, mapOutput })`
+- **State reducers** - `appendReducer`, `counterReducer`, `mergeReducer`, `unionReducer`
+- **Checkpointing** - `InMemoryCheckpointer` or `MinnsCheckpointer` for graph-persisted state
+- **Human-in-the-loop** - `interruptBefore: ["deploy"]` pauses for approval
+- **Streaming** - `graph.stream(input)` yields events as nodes execute
 
 ---
 
@@ -692,11 +694,11 @@ const agent = new AgentForge({
 });
 ```
 
-- **Adaptive Compute** — classifies query complexity, skips unnecessary pipeline phases for simple questions
-- **MCTS Tree Search** — Monte Carlo tree search explores multiple action paths, picks the best
-- **Reflexion** — extracts constraints from past failures, prevents repeating mistakes
-- **World Model** — simulates "what would happen if I did X" before executing
-- **Self-Critique** — evaluates response quality, rewrites if it doesn't meet criteria
+- **Adaptive Compute** - classifies query complexity, skips unnecessary pipeline phases for simple questions
+- **MCTS Tree Search** - Monte Carlo tree search explores multiple action paths, picks the best
+- **Reflexion** - extracts constraints from past failures, prevents repeating mistakes
+- **World Model** - simulates "what would happen if I did X" before executing
+- **Self-Critique** - evaluates response quality, rewrites if it doesn't meet criteria
 
 ---
 
@@ -733,10 +735,10 @@ Both LLM providers (OpenAI, Anthropic) support native tool-use protocols. Automa
 ## LLM Providers
 
 ```typescript
-// OpenAI-compatible — works with OpenAI, Azure, Groq, Together, OpenRouter, vLLM, Ollama
+// OpenAI-compatible - works with OpenAI, Azure, Groq, Together, OpenRouter, vLLM, Ollama
 new OpenAIProvider({ apiKey: "...", model: "gpt-4o", baseUrl: "https://..." })
 
-// Anthropic — native SDK with tool_use, prompt caching, streaming
+// Anthropic - native SDK with tool_use, prompt caching, streaming
 new AnthropicProvider({ apiKey: "...", model: "claude-sonnet-4-6" })
 ```
 
