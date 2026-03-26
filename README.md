@@ -1,9 +1,14 @@
 # @minns/agent-forge
 
-Build autonomous agents that remember everything, reason about complex tasks, coordinate with each other, and query their own knowledge in real time.
+**The agent framework that thinks, remembers, and coordinates.**
+
+Build autonomous agents with a 10-phase execution pipeline, graph-native memory, temporal tables, multi-agent coordination, and five reasoning engines. Use everything or just the parts you need.
+
+[![npm](https://img.shields.io/npm/v/@minns/agent-forge)](https://www.npmjs.com/package/@minns/agent-forge)
+[![license](https://img.shields.io/npm/l/@minns/agent-forge)](./LICENSE)
 
 ```bash
-npm install @minns/agent-forge
+npm i @minns/agent-forge
 ```
 
 ```typescript
