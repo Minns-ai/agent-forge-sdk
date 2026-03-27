@@ -1,6 +1,6 @@
 # @minns/agent-forge
 
-**The agent framework that thinks, remembers, and coordinates.**
+**The agent framework that thinks, remembers, and coordinates. by [www.minns.ai](https://minns.ai)**
 
 Build autonomous agents with adaptive execution, graph-native memory, composable middleware, multi-agent coordination, and reasoning engines. Use everything or just the parts you need.
 
