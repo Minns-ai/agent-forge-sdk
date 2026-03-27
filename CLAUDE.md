@@ -2,7 +2,7 @@
 
 ## Overview
 
-TypeScript agent framework SDK. ESM-only, strict TypeScript, no default exports. Powered by `minns-sdk` (^0.7.2) as the memory layer. Ships a 10-phase execution pipeline with advanced reasoning engines.
+TypeScript agent framework SDK. ESM-only, strict TypeScript, no default exports. Powered by `minns-sdk` (^0.7.2) as the optional memory layer. Ships an adaptive two-tier execution engine with reasoning engines, composable middleware, and a graph execution engine.
 
 ## Architecture
 
@@ -40,17 +40,19 @@ src/
       report-failure.ts   — reportFailureTool (sendMessage)
 
   pipeline/
-    runner.ts                   — PipelineRunner: orchestrates all phases
-    intent-phase.ts             — Phase 1: LLM intent classification (JSON output)
-    semantic-write-phase.ts     — Phase 2: sendMessage for graph ingestion
-    memory-retrieval-phase.ts   — Phase 3: searchClaims + query in parallel
-    plan-phase.ts               — Phase 4: LLM plan generation
-    auto-store-phase.ts         — Phase 5: Auto-store facts for inform intents
-    action-loop-phase.ts        — Phase 6: Flat tool loop or MCTS tree search
-    reasoning-phase.ts          — Phase 7: Store reasoning steps via sendMessage
-    goal-check-phase.ts         — Phase 8: Run goalChecker, handle completion
-    response-phase.ts           — Phase 9: LLM response generation
-    finalize-phase.ts           — Phase 10: Store assistant message, update history
+    adaptive-runner.ts          — AdaptiveRunner: two-tier execution engine (agentic loop + graph pipeline)
+    runner.ts                   — PipelineRunner (legacy, deprecated — use AdaptiveRunner)
+    phases/
+      intent-phase.ts           — LLM intent classification (used by legacy runner)
+      semantic-write-phase.ts   — sendMessage for graph ingestion
+      memory-retrieval-phase.ts — searchClaims + query in parallel
+      plan-phase.ts             — LLM plan generation
+      auto-store-phase.ts       — Auto-store facts for inform intents
+      action-loop-phase.ts      — Flat tool loop or MCTS tree search
+      reasoning-phase.ts        — Store reasoning steps (no-op, kept for compat)
+      goal-check-phase.ts       — Run goalChecker, handle completion
+      response-phase.ts         — LLM response generation
+      finalize-phase.ts         — Store assistant message, update history
 
   reasoning/
     types.ts            — TreeNode, ComplexityAssessment, ReflexionConstraint, CritiqueResult, etc.

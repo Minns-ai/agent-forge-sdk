@@ -9,6 +9,7 @@ import type {
 } from "./types.js";
 import type { MemoryIntegration } from "./memory/provider.js";
 import { InMemorySessionStore } from "./session/in-memory-store.js";
+import { AdaptiveRunner } from "./pipeline/adaptive-runner.js";
 import { PipelineRunner } from "./pipeline/runner.js";
 import { AgentEventEmitter } from "./events/emitter.js";
 import { searchMemoriesTool } from "./tools/builtin/search-memories.js";
@@ -55,35 +56,25 @@ const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, repo
 export class AgentForge {
   private config: AgentForgeConfig;
   private sessionStore: AgentForgeConfig["sessionStore"];
-  private runner: PipelineRunner;
+  private runner: AdaptiveRunner;
 
   constructor(config: AgentForgeConfig) {
     this.config = config;
     this.sessionStore = config.sessionStore ?? new InMemorySessionStore();
 
     // ── Resolve memory provider ─────────────────────────────────────────
-    // Priority:
-    // 1. config.memory as MemoryIntegration (new API)
-    // 2. config.memory as raw minns-sdk client (legacy — auto-wrapped)
-    // 3. config.memoryApiKey → create minns client → wrap
-    // 4. null → no memory, pipeline skips memory phases
     let memoryProvider: MemoryIntegration | null = null;
     let legacyClient: any = null;
 
     if (config.memory) {
       if (isMemoryIntegration(config.memory)) {
-        // New API: MemoryIntegration (MinnsMemory, FileMemory, custom)
         memoryProvider = config.memory;
-        // If it's a MinnsMemory, extract the raw client for built-in tools
-        // that still use the legacy client.sendMessage() pattern
         legacyClient = (config.memory as any).client ?? null;
       } else if (isLegacyClient(config.memory)) {
-        // Legacy: raw minns-sdk client
         memoryProvider = wrapLegacyClient(config.memory);
         legacyClient = config.memory;
       }
     } else if (config.memoryApiKey) {
-      // Convenience: create minns client from API key
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { createClient } = require("minns-sdk");
@@ -91,18 +82,16 @@ export class AgentForge {
         memoryProvider = new MinnsMemory({ client });
         legacyClient = client;
       } catch {
-        // minns-sdk not installed — continue without memory
+        // minns-sdk not installed
       }
     }
 
-    // Only include memory-dependent built-in tools when memory is active
-    // AND we have a legacy client (built-in tools use client.sendMessage directly)
     const allTools = [
       ...(legacyClient ? BUILTIN_TOOLS : []),
       ...(config.tools ?? []),
     ];
 
-    this.runner = new PipelineRunner({
+    this.runner = new AdaptiveRunner({
       directive: config.directive,
       llm: config.llm,
       client: legacyClient,

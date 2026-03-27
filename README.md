@@ -2,7 +2,7 @@
 
 **The agent framework that thinks, remembers, and coordinates.**
 
-Build autonomous agents with a 10-phase execution pipeline, graph-native memory, temporal tables, multi-agent coordination, and five reasoning engines. Use everything or just the parts you need.
+Build autonomous agents with adaptive execution, graph-native memory, composable middleware, multi-agent coordination, and reasoning engines. Use everything or just the parts you need.
 
 [![npm](https://img.shields.io/npm/v/@minns/agent-forge)](https://www.npmjs.com/package/@minns/agent-forge)
 [![license](https://img.shields.io/npm/l/@minns/agent-forge)](./LICENSE)
@@ -49,7 +49,7 @@ const result = await agent.run("What caused the auth service outage last week an
 
 Most agent frameworks give you a prompt loop and call it a day. agent-forge gives you:
 
-- **A 10-phase execution pipeline** with intent classification, planning, tool execution, goal tracking, and reasoning
+- **An adaptive execution engine** that routes between a fast agentic loop and a full graph pipeline based on task complexity
 - **Graph-native memory** that actually understands relationships between facts, not just vector similarity
 - **Temporal tables and MinnsQL** so your agent can create, query, and subscribe to structured data in real time
 - **Multi-agent coordination** where agents in separate terminals discover each other and split work through a shared graph
@@ -465,27 +465,53 @@ app.get("/api/chat", async (req, res) => {
 
 ## Architecture
 
-agent-forge runs a 10-phase execution pipeline on every message:
+agent-forge uses an **adaptive two-tier execution engine**. A heuristic router decides what each message needs - no wasted LLM calls on simple questions, full reasoning power for complex tasks.
+
+### Tier 1: Agentic Loop (default)
+
+Most messages hit the fast path. One system prompt, one tool-calling loop. The model handles intent, planning, and memory retrieval in its own reasoning.
 
 ```
- 1. Intent Classification    LLM classifies user intent (ask, inform, action, etc.)
- 2. Semantic Write           Sends message to minns for graph ingestion + claim extraction
- 3. Memory Retrieval         Hybrid search (BM25 + semantic + RRF) + NLQ in parallel
- 4. Plan Generation          LLM generates a multi-step plan for complex tasks
- 5. Auto-Store               Automatically stores facts for inform-type intents
- 6. Action Loop              Flat tool loop or MCTS tree search with tool execution
- 7. Reasoning                Stores reasoning steps back into the graph
- 8. Goal Check               Evaluates progress, handles goal completion
- 9. Response Generation      LLM generates the final response
-10. Finalize                 Stores assistant message, updates conversation history
+User message
+  |
+Middleware: beforeExecute (load state, inject context, register tools)
+  |
+Agentic Loop:
+  LLM call (system prompt + history + tools)
+    -> tool calls? Execute, append results, loop
+    -> no tool calls? Return the response
+  |
+Middleware: afterExecute (persist state, ingest to minns, update history)
+  |
+Return result
 ```
 
-The pipeline is wrapped by a composable middleware stack. Middleware can intercept at three points: before execution, around every LLM call, and after execution.
+### Tier 2: Graph Pipeline (complex tasks)
 
-Two execution modes:
+Activated by the heuristic router for multi-step tasks, first turns with memory, or when tree search is enabled. Uses the graph execution engine for conditional routing between phases.
 
-- **`agent.run(message, options)`** - full 10-phase pipeline
-- **`agent.runSimple(task)`** - lightweight ReAct loop (system prompt + tool loop), no memory or intent parsing
+```
+Memory Retrieval -> Complexity Assessment -> Reflexion -> Action Loop -> Self-Critique -> Finalize
+                                                            |
+                                                    (MCTS tree search
+                                                     or agentic loop)
+```
+
+### How the router decides
+
+No LLM call needed - pure heuristics:
+- **Short messages, greetings, follow-ups** -> Tier 1
+- **First turn with memory configured** -> Tier 2 (prime context)
+- **Multi-step requests, long complex messages** -> Tier 2
+- **Tree search explicitly enabled** -> Tier 2
+- **Everything else** -> Tier 1
+
+The distribution is bimodal: most tasks are simple (direct loop) or complex (full pipeline). Two tiers is the right granularity.
+
+### Execution modes
+
+- **`agent.run(message, options)`** - adaptive pipeline (routes to Tier 1 or 2)
+- **`agent.runSimple(task)`** - lightweight ReAct loop, no memory or middleware
 
 ---
 
@@ -646,6 +672,70 @@ Subscribe to MinnsQL queries and receive incremental updates as the graph change
 
 ---
 
+## VibeGraphMiddleware
+
+Turn a natural language description into an executable multi-agent workflow. The agent calls the `vibe_graph` tool and the system handles the rest.
+
+```typescript
+import { AgentForge, OpenAIProvider, VibeGraphMiddleware } from "@minns/agent-forge";
+
+const agent = new AgentForge({
+  directive: {
+    identity: "You are a project coordinator that builds multi-agent workflows on demand.",
+    goalDescription: "Design and execute collaborative workflows for complex tasks",
+  },
+  llm: new OpenAIProvider({ apiKey: process.env.OPENAI_KEY!, model: "gpt-4o" }),
+  agentId: 1,
+  middleware: [new VibeGraphMiddleware()],
+});
+
+await agent.run("Research the impact of AI on healthcare with 3 parallel researchers, then synthesize into a report", {
+  sessionId: 1,
+});
+// Agent calls: vibe_graph({ description: "...", user_input: "...", execute_immediately: "true" })
+// System compiles a 4-node graph (3 researchers + 1 synthesizer)
+// Researchers run in parallel, synthesizer combines their outputs
+// Returns the final report
+```
+
+### How it works
+
+A 3-stage LLM compilation pipeline converts text into a directed graph:
+
+```
+"Research X with parallel investigators, then synthesize"
+  |
+Stage 1: Role Assignment
+  LLM identifies agent roles: researcher_a, researcher_b, researcher_c, synthesizer
+  |
+Stage 2: Structure Design
+  LLM designs the graph topology:
+  ENTRY -> [researcher_a, researcher_b, researcher_c] -> synthesizer -> EXIT
+  |
+Stage 3: Semantic Completion
+  LLM fills in each node's system prompt, input/output fields
+  |
+Compile into AgentGraph -> Execute -> Return results
+```
+
+Each node in the compiled graph is an LLM agent with its own role, instructions, and I/O contract. Data flows through named fields - upstream outputs become downstream inputs.
+
+### Options
+
+```typescript
+// Compile only (inspect the IR before running)
+// Agent calls: vibe_graph({ description: "...", execute_immediately: "false" })
+// Returns the intermediate representation without executing
+
+// With minns persistence (other agents can discover and reuse workflows)
+new VibeGraphMiddleware({
+  minnsClient: createClient(process.env.MINNS_KEY!),
+  groupId: "my-team",
+})
+```
+
+---
+
 ## Graph Execution Engine
 
 Build workflows as directed graphs with branching, looping, parallel execution, checkpointing, and human-in-the-loop interrupts.
@@ -699,7 +789,7 @@ const agent = new AgentForge({
 });
 ```
 
-- **Adaptive Compute** - classifies query complexity, skips unnecessary pipeline phases for simple questions
+- **Adaptive Compute** - heuristic router classifies complexity and picks the right execution tier
 - **MCTS Tree Search** - Monte Carlo tree search explores multiple action paths, picks the best
 - **Reflexion** - extracts constraints from past failures, prevents repeating mistakes
 - **World Model** - simulates "what would happen if I did X" before executing
