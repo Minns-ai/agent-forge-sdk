@@ -329,9 +329,6 @@ export class AdaptiveRunner {
 
     const emit = (event: AgentEvent) => emitter?.emit(event);
 
-    // Update iteration count
-    sessionState.iterationCount = (sessionState.iterationCount || 0) + 1;
-
     // ── Build PipelineState ──────────────────────────────────────────────
     const pipelineState: PipelineState = {
       message,
@@ -421,6 +418,9 @@ export class AdaptiveRunner {
     );
 
     emit({ type: "phase", data: { phase: "route", duration_ms: 0, summary: `Tier: ${tier}` } });
+
+    // Update iteration count (after routing so first-turn check works)
+    sessionState.iterationCount = (sessionState.iterationCount || 0) + 1;
 
     let responseMessage: string;
 
@@ -553,18 +553,9 @@ export class AdaptiveRunner {
       tools: toolSpecs,
     });
 
-    // Apply middleware system prompt modifications
-    let finalSystemPrompt = systemPrompt;
-    if (!this.middlewareStack.isEmpty) {
-      finalSystemPrompt = this.middlewareStack.applySystemPromptModifications(
-        [{ role: "system", content: systemPrompt }],
-        pipelineState,
-      )[0]?.content ?? systemPrompt;
-    }
-
-    // Build conversation messages
-    const messages: LLMMessage[] = [
-      { role: "system", content: finalSystemPrompt },
+    // Build conversation messages (system prompt will be modified by middleware below)
+    let messages: LLMMessage[] = [
+      { role: "system", content: systemPrompt },
     ];
 
     // Add conversation history
@@ -574,6 +565,11 @@ export class AdaptiveRunner {
 
     // Add current message
     messages.push({ role: "user", content: message });
+
+    // Apply middleware system prompt modifications
+    if (!this.middlewareStack.isEmpty) {
+      messages = this.middlewareStack.applySystemPromptModifications(messages, pipelineState);
+    }
 
     // ── Tool-calling loop ────────────────────────────────────────────────
     const maxSteps = this.directive.maxIterations ?? 10;
@@ -631,6 +627,13 @@ export class AdaptiveRunner {
             pipelineState.goalProgress = progress;
             if (progress.completed) {
               allReasoning.push("Goal completed during tool execution");
+              // Let the model generate a final response with goal-complete context
+              try {
+                const finalResponse = await this.llm.completeWithTools!(messages, toolSpecs);
+                responseText = finalResponse.content ?? "";
+              } catch {
+                responseText = "Task completed successfully.";
+              }
               break;
             }
 
