@@ -1,3 +1,6 @@
+// ─── Runtime bridge (minns control-plane contract) ──────────────────────────
+export * from "./runtime/index.js";
+
 // ─── Core ────────────────────────────────────────────────────────────────────
 export { AgentForge } from "./agent.js";
 export { SimpleAgent } from "./simple-agent.js";

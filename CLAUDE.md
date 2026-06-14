@@ -69,11 +69,37 @@ src/
   events/
     emitter.ts          — AgentEventEmitter: typed events, callback + async iterable
 
+  runtime/              — minns control-plane contract (deploy-time bridge)
+    contract.ts         — InvokeRequest/InvokeResponse wire types + AGENT_ID_RESOURCE_ATTR
+    env.ts              — readMinnsEnv(): MINNS_TELEMETRY_URL/LOGS_URL/APPROVAL_URL/TOKEN/AGENT_ID
+    otlp.ts             — TelemetryReporter: OTLP/JSON GenAI span exporter (light "observed" tier)
+    logs.ts             — LogShipper: batched log shipping to MINNS_LOGS_URL
+    approval.ts         — createHttpApprovalHandler: HITL → control-plane approval queue
+    durable.ts          — createGraphStepHandler: maps invoke/checkpoint/interrupt → step contract
+    serve.ts            — serveAgent(): HTTP harness exposing /v1/invoke + /healthz
+
   utils/
     timer.ts            — PipelineTimer: phase timing
     json.ts             — safeJsonParse, canonicalizeJson
     fingerprint.ts      — computeContextFingerprint
 ```
+
+## Runtime bridge (deploy-time contract)
+
+The `runtime/` module is how a deployed agent talks to the minns control plane,
+split into two decoupled tiers:
+
+- **Instrument / "observed by us"** — `TelemetryReporter` (OTLP/JSON GenAI spans
+  tagged with the `minns.agent.id` resource attribute), `LogShipper`, and the
+  HTTP approval handler. Driven by the env rails (`readMinnsEnv()`). This is the
+  light, framework-agnostic tier — most value (cost/metrics/traces/evals) needs
+  only this, no durable runtime.
+- **Durable / "runs on us"** — `serveAgent({ handler })` exposes `POST /v1/invoke`
+  (the contract in `contract.ts`). `createGraphStepHandler({ graph, ... })` adapts
+  a compiled graph's `invoke()`/checkpoint/interrupt model onto it: each invoke is
+  one `graph.invoke()`, an interrupt at an approval node → `needs_approval`, and a
+  resume call continues from the checkpoint. The control plane's Temporal worker
+  drives this in a multi-step loop, pausing on the `approval` signal.
 
 ## Build & Dev Commands
 
