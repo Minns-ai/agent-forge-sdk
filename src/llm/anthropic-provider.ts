@@ -42,7 +42,7 @@ export class AnthropicProvider implements LLMProvider {
 
   constructor(config: AnthropicProviderConfig) {
     this.apiKey = config.apiKey;
-    this.model = config.model ?? "claude-sonnet-4-5-20250929";
+    this.model = config.model ?? "claude-opus-4-8";
     this.maxTokens = config.maxTokens ?? 2048;
     this.temperature = config.temperature ?? 0.7;
     this.timeoutMs = config.timeoutMs ?? 60_000;

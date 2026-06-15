@@ -39,6 +39,16 @@ export interface ModelPricing {
 // Keys are matched by longest-prefix so "claude-opus-4-8" resolves "claude-opus-4".
 // Override or extend with registerModelPricing().
 const PRICING: Record<string, ModelPricing> = {
+  // Current Claude lineup (longest-prefix wins, so these override claude-opus-4).
+  "claude-fable-5": { input: 10, output: 50, cachedInput: 1, cacheWrite: 12.5 },
+  "claude-mythos-5": { input: 10, output: 50, cachedInput: 1, cacheWrite: 12.5 },
+  "claude-opus-4-8": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
+  "claude-opus-4-7": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
+  "claude-opus-4-6": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
+  "claude-opus-4-5": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
+  "claude-sonnet-4-6": { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 },
+  "claude-haiku-4-5": { input: 1, output: 5, cachedInput: 0.1, cacheWrite: 1.25 },
+  // Older Claude (Opus 4.0/4.1 list price, Sonnet 4 / Haiku 4, 3.x).
   "claude-opus-4": { input: 15, output: 75, cachedInput: 1.5, cacheWrite: 18.75 },
   "claude-sonnet-4": { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 },
   "claude-haiku-4": { input: 0.8, output: 4, cachedInput: 0.08, cacheWrite: 1 },
@@ -58,12 +68,19 @@ export function registerModelPricing(modelPrefix: string, pricing: ModelPricing)
   PRICING[modelPrefix] = pricing;
 }
 
-/** Resolve pricing for a model id by longest-prefix match, or null if unknown. */
+/** Resolve pricing for a model id by longest-prefix match, or null if unknown.
+ *  Also matches OpenRouter-style `vendor/model` ids (e.g. "anthropic/claude-opus-4-8")
+ *  by falling back to the segment after the last slash. */
 export function pricingFor(model: string): ModelPricing | null {
+  const candidates = [model];
+  const slash = model.lastIndexOf("/");
+  if (slash >= 0) candidates.push(model.slice(slash + 1));
   let best: { key: string; pricing: ModelPricing } | null = null;
-  for (const [key, pricing] of Object.entries(PRICING)) {
-    if (model.startsWith(key) && (!best || key.length > best.key.length)) {
-      best = { key, pricing };
+  for (const id of candidates) {
+    for (const [key, pricing] of Object.entries(PRICING)) {
+      if (id.startsWith(key) && (!best || key.length > best.key.length)) {
+        best = { key, pricing };
+      }
     }
   }
   return best?.pricing ?? null;

@@ -51,7 +51,14 @@ export {
 // ─── LLM Providers ──────────────────────────────────────────────────────────
 export { OpenAIProvider } from "./llm/openai-provider.js";
 export { AnthropicProvider } from "./llm/anthropic-provider.js";
-export type { OpenAIProviderConfig, AnthropicProviderConfig } from "./llm/types.js";
+export { OpenRouterProvider } from "./llm/openrouter-provider.js";
+export { createModelProvider } from "./llm/factory.js";
+export type { ProviderKind, ModelProviderConfig } from "./llm/factory.js";
+export type {
+  OpenAIProviderConfig,
+  AnthropicProviderConfig,
+  OpenRouterProviderConfig,
+} from "./llm/types.js";
 
 // ─── LLM usage/cost accounting + resilience ──────────────────────────────────
 export {

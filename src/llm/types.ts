@@ -15,6 +15,17 @@ export interface OpenAIProviderConfig {
   resilience?: ResilienceConfig;
 }
 
+/** Configuration for the OpenRouter provider. OpenRouter is OpenAI-compatible,
+ *  so this extends the OpenAI config; `model` uses OpenRouter's `vendor/model`
+ *  ids (e.g. "anthropic/claude-opus-4-8", "openai/gpt-4o", "google/gemini-2.0-flash"),
+ *  which is how you reach every model OpenRouter aggregates. */
+export interface OpenRouterProviderConfig extends OpenAIProviderConfig {
+  /** Optional `HTTP-Referer` header — your app URL, for OpenRouter ranking. */
+  referer?: string;
+  /** Optional `X-Title` header — your app name, for OpenRouter ranking. */
+  title?: string;
+}
+
 /** Configuration for the Anthropic provider */
 export interface AnthropicProviderConfig {
   apiKey: string;

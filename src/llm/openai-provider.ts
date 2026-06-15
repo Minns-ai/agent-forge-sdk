@@ -5,10 +5,10 @@ import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
 
 /** Extract normalized usage from an OpenAI chat-completions payload. */
-function usageFromOpenAI(model: string, payload: any): TokenUsage {
+function usageFromOpenAI(provider: string, model: string, payload: any): TokenUsage {
   const u = payload?.usage ?? {};
   return makeUsage({
-    provider: "openai",
+    provider,
     model,
     inputTokens: u.prompt_tokens ?? 0,
     outputTokens: u.completion_tokens ?? 0,
@@ -80,6 +80,14 @@ export class OpenAIProvider implements LLMProvider {
   private readonly onUsage?: UsageSink;
   private readonly run: <T>(fn: () => Promise<T>) => Promise<T>;
 
+  /** Provider label used for usage/telemetry tagging. Subclasses override. */
+  protected providerLabel = "openai";
+  /** Extra HTTP headers merged into every request. Subclasses override
+   *  (e.g. OpenRouter ranking headers). */
+  protected providerHeaders(): Record<string, string> {
+    return {};
+  }
+
   constructor(config: OpenAIProviderConfig) {
     this.apiKey = config.apiKey;
     this.model = config.model ?? "gpt-4o-mini";
@@ -101,6 +109,7 @@ export class OpenAIProvider implements LLMProvider {
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
+          ...this.providerHeaders(),
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -135,7 +144,7 @@ export class OpenAIProvider implements LLMProvider {
         ...(options?.stop ? { stop: options.stop } : {}),
       }),
     );
-    this.onUsage?.(usageFromOpenAI(this.model, payload));
+    this.onUsage?.(usageFromOpenAI(this.providerLabel, this.model, payload));
 
     const content = payload?.choices?.[0]?.message?.content?.trim();
     if (!content) {
@@ -165,7 +174,7 @@ export class OpenAIProvider implements LLMProvider {
         ...(options?.stop ? { stop: options.stop } : {}),
       }),
     );
-    const usage = usageFromOpenAI(this.model, payload);
+    const usage = usageFromOpenAI(this.providerLabel, this.model, payload);
     this.onUsage?.(usage);
 
     const choice = payload?.choices?.[0];
@@ -203,6 +212,7 @@ export class OpenAIProvider implements LLMProvider {
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
+          ...this.providerHeaders(),
         },
         body: JSON.stringify({
           model: this.model,

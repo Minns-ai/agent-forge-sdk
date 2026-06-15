@@ -10,23 +10,27 @@ import {
 
 describe("usage: pricing", () => {
   it("resolves pricing by longest-prefix match", () => {
-    expect(pricingFor("claude-opus-4-8")?.input).toBe(15);
+    // claude-opus-4-8 ($5/$25) must win over the generic claude-opus-4 ($15/$75)
+    expect(pricingFor("claude-opus-4-8")?.input).toBe(5);
+    expect(pricingFor("claude-opus-4-0")?.input).toBe(15);
     expect(pricingFor("gpt-4o-mini")?.input).toBe(0.15);
     // gpt-4o-mini must win over gpt-4o for the mini id
     expect(pricingFor("gpt-4o-mini")?.output).toBe(0.6);
     expect(pricingFor("gpt-4o-2024-08-06")?.input).toBe(2.5);
+    // OpenRouter-style vendor/model ids resolve via the post-slash segment
+    expect(pricingFor("anthropic/claude-opus-4-8")?.input).toBe(5);
     expect(pricingFor("totally-unknown-model")).toBeNull();
   });
 
   it("estimates cost from input/output tokens", () => {
-    // opus: 1000 in * $15/1M + 500 out * $75/1M = 0.015 + 0.0375 = 0.0525
-    expect(estimateCost("claude-opus-4-8", 1000, 500)).toBeCloseTo(0.0525, 6);
+    // opus 4.8: 1000 in * $5/1M + 500 out * $25/1M = 0.005 + 0.0125 = 0.0175
+    expect(estimateCost("claude-opus-4-8", 1000, 500)).toBeCloseTo(0.0175, 6);
   });
 
   it("prices cached-read tokens at the cheaper rate", () => {
-    // 1000 input of which 800 cached: 200*15 + 800*1.5 (per 1M) out 0
+    // 1000 input of which 800 cached: 200*5 + 800*0.5 (per 1M) out 0
     const cost = estimateCost("claude-opus-4-8", 1000, 0, 800);
-    expect(cost).toBeCloseTo((200 * 15 + 800 * 1.5) / 1_000_000, 6);
+    expect(cost).toBeCloseTo((200 * 5 + 800 * 0.5) / 1_000_000, 6);
   });
 
   it("returns 0 for unknown models (graceful)", () => {
