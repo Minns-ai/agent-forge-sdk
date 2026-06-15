@@ -15,8 +15,16 @@ export interface TreeNode {
   observation: string | null;
   /** Reflection on whether the observation matched expectations */
   reflection: string | null;
-  /** Value score assigned by the evaluator (0-1) */
+  /** Value score assigned by the evaluator (0-1). Post-execution this holds the
+   *  observed value; during planning it holds the MCTS mean value (Q). */
   score: number;
+  /** MCTS prior P(s,a) — the pre-search evaluator/world-model estimate used to
+   *  bias PUCT selection. */
+  prior: number;
+  /** MCTS visit count N(s,a) accumulated during the simulation budget. */
+  visits: number;
+  /** MCTS cumulative value W(s,a); mean value Q = totalValue / visits. */
+  totalValue: number;
   /** Whether this node has been executed */
   executed: boolean;
   /** Whether this node has been pruned (abandoned) */
@@ -41,10 +49,17 @@ export interface TreeSearchConfig {
   branchingFactor: number;
   /** Minimum score to keep a branch alive (default 0.3) */
   pruneThreshold: number;
-  /** UCB1 exploration constant (default 1.41) */
+  /** PUCT exploration constant c_puct (default 1.41) */
   explorationConstant: number;
   /** Whether to enable parallel speculation (default false, costs more LLM calls) */
   enableSpeculation: boolean;
+  /** MCTS simulation budget — PUCT iterations run per real step before committing
+   *  the most-visited action (default 16). Rollouts reuse cached priors, so this
+   *  costs no extra LLM calls. */
+  simulationBudget: number;
+  /** Whether to run MCTS (PUCT + value backpropagation). When false, falls back
+   *  to greedy selection by prior (default true). */
+  enableBackprop: boolean;
 }
 
 export interface TreeSearchResult {

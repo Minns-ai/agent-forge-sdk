@@ -126,7 +126,8 @@ export { safeJsonParse, canonicalizeJson } from "./utils/json.js";
 // ─── Reasoning ──────────────────────────────────────────────────────────────
 export { MetaReasoner } from "./reasoning/meta-reasoner.js";
 export { ReflexionEngine } from "./reasoning/reflexion.js";
-export { TreeSearchEngine } from "./reasoning/tree-search.js";
+export { TreeSearchEngine, puctScore, robustChild } from "./reasoning/tree-search.js";
+export type { MctsStats } from "./reasoning/tree-search.js";
 export { SelfCritique } from "./reasoning/self-critique.js";
 export { WorldModel } from "./reasoning/world-model.js";
 export type {

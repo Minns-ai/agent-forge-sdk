@@ -28,11 +28,51 @@ const DEFAULT_CONFIG: TreeSearchConfig = {
   pruneThreshold: 0.3,
   explorationConstant: 1.41,
   enableSpeculation: false,
+  simulationBudget: 16,
+  enableBackprop: true,
 };
 
 let nodeCounter = 0;
 function nextNodeId(): string {
   return `n_${++nodeCounter}`;
+}
+
+/** Minimal MCTS statistics a node carries (subset of TreeNode). */
+export interface MctsStats {
+  prior: number;
+  visits: number;
+  totalValue: number;
+}
+
+/**
+ * AlphaZero PUCT score: Q(s,a) + c_puct · P(s,a) · √ΣN / (1 + N).
+ * Unvisited nodes use their prior for Q so early selection tracks the
+ * evaluator's ranking before statistics accumulate. Pure — unit-tested.
+ */
+export function puctScore(node: MctsStats, parentVisits: number, cPuct: number): number {
+  const q = node.visits > 0 ? node.totalValue / node.visits : node.prior;
+  return q + (cPuct * node.prior * Math.sqrt(parentVisits)) / (1 + node.visits);
+}
+
+/**
+ * MCTS "robust child": the most-visited node, tie-broken by mean value
+ * (Q = totalValue / visits, falling back to prior when unvisited). Returns null
+ * for an empty list. Pure — unit-tested.
+ */
+export function robustChild<T extends MctsStats>(nodes: T[]): T | null {
+  let best: T | null = null;
+  for (const c of nodes) {
+    if (!best) {
+      best = c;
+      continue;
+    }
+    const bestMean = best.visits > 0 ? best.totalValue / best.visits : best.prior;
+    const cMean = c.visits > 0 ? c.totalValue / c.visits : c.prior;
+    if (c.visits > best.visits || (c.visits === best.visits && cMean > bestMean)) {
+      best = c;
+    }
+  }
+  return best;
 }
 
 /**
@@ -107,6 +147,9 @@ export class TreeSearchEngine {
       observation: null,
       reflection: null,
       score: 0.5,
+      prior: 0.5,
+      visits: 0,
+      totalValue: 0,
       executed: false,
       pruned: false,
       children: [],
@@ -149,8 +192,9 @@ export class TreeSearchEngine {
         directive.goalDescription,
       );
 
-      // ── 3. SELECT: Pick best candidate via UCB1-like scoring ───────────
-      const selected = this.select(scoredCandidates, currentNodeId);
+      // ── 3. SELECT: Run MCTS (PUCT + value backpropagation), commit the
+      //        most-visited action ──────────────────────────────────────────
+      const selected = this.mctsPlan(scoredCandidates, currentNodeId, goalProgress);
       if (!selected || selected.score < this.config.pruneThreshold) {
         reasoning.push(
           selected
@@ -160,14 +204,16 @@ export class TreeSearchEngine {
         break;
       }
 
-      // Register in tree
-      selected.parentId = currentNodeId;
+      // Register the committed node in the tree
       selected.depth = depth + 1;
       this.tree.set(selected.id, selected);
       const parent = this.tree.get(currentNodeId);
-      if (parent) parent.children.push(selected.id);
+      if (parent && !parent.children.includes(selected.id)) parent.children.push(selected.id);
 
-      reasoning.push(`[depth=${depth + 1}] Thought: ${selected.thought}`);
+      const q = selected.visits > 0 ? selected.totalValue / selected.visits : selected.prior;
+      reasoning.push(
+        `[depth=${depth + 1}] (MCTS: ${selected.visits} sims, Q=${q.toFixed(2)}, prior=${selected.prior.toFixed(2)}) Thought: ${selected.thought}`,
+      );
 
       // ── 4. Terminal: "respond" action → stop ───────────────────────────
       if (selected.action.type === "respond") {
@@ -363,6 +409,9 @@ Generate exactly ${this.config.branchingFactor} diverse candidates:`,
         observation: null,
         reflection: null,
         score: 0.4,
+        prior: 0.4,
+        visits: 0,
+        totalValue: 0,
         executed: false,
         pruned: false,
         children: [],
@@ -406,36 +455,113 @@ Generate exactly ${this.config.branchingFactor} diverse candidates:`,
 
     return simulations
       .filter((r): r is PromiseFulfilledResult<TreeNode> => r.status === "fulfilled")
-      .map((r) => r.value)
+      .map((r) => {
+        // The blended eval+simulation score is the MCTS prior P(s,a).
+        r.value.prior = r.value.score;
+        return r.value;
+      })
       .sort((a, b) => b.score - a.score);
   }
 
   /**
    * SELECT: Pick the best candidate using UCB1-like scoring.
    */
-  private select(candidates: TreeNode[], parentId: string): TreeNode | null {
-    if (candidates.length === 0) return null;
+  /**
+   * MCTS planning step (AlphaZero-style PUCT). Runs `simulationBudget`
+   * iterations over the freshly-expanded candidates — each iteration selects via
+   * PUCT, estimates a rollout value, and backpropagates it up to the root — then
+   * commits the **most-visited** candidate (the robust child, less noisy than
+   * argmax-Q). Rollouts reuse the cached eval/world-model priors, so the search
+   * costs no extra LLM calls. Returns the committed node, or null.
+   */
+  private mctsPlan(
+    candidates: TreeNode[],
+    parentId: string,
+    goalProgress: GoalProgress,
+  ): TreeNode | null {
+    const live = candidates.filter((c) => !c.pruned);
+    if (live.length === 0) return null;
 
+    // Attach candidates to the current frontier and reset their statistics.
+    for (const c of live) {
+      c.parentId = parentId;
+      c.visits = 0;
+      c.totalValue = 0;
+    }
+
+    if (!this.config.enableBackprop) {
+      // Greedy fallback: highest prior.
+      let best = live[0];
+      for (const c of live) if (c.prior > best.prior) best = c;
+      best.score = best.prior;
+      return best;
+    }
+
+    const budget = Math.max(live.length, this.config.simulationBudget);
+    for (let i = 0; i < budget; i++) {
+      const node = this.puctSelect(live, parentId);
+      if (!node) break;
+      const value = this.rolloutValue(node, goalProgress);
+      this.backpropagate(node, parentId, value);
+    }
+
+    // Robust child: most-visited, tie-broken by mean value.
+    const best = robustChild(live);
+    // Expose the learned mean value as the node's working score for the
+    // prune-threshold gate and best-path tracing.
+    if (best && best.visits > 0) best.score = best.totalValue / best.visits;
+    return best;
+  }
+
+  /**
+   * PUCT selection: argmax over Q(s,a) + c_puct · P(s,a) · √ΣN / (1 + N).
+   * Unvisited candidates fall back to their prior for Q so the first visits
+   * track the evaluator's ranking before statistics accumulate.
+   */
+  private puctSelect(candidates: TreeNode[], parentId: string): TreeNode | null {
     const parent = this.tree.get(parentId);
-    const parentVisits = parent ? parent.children.length + 1 : 1;
+    const childVisits = candidates.reduce((s, c) => s + c.visits, 0);
+    const parentVisits = (parent?.visits ?? 0) + childVisits + 1;
+    const c = this.config.explorationConstant;
 
-    let bestScore = -Infinity;
     let best: TreeNode | null = null;
-
+    let bestU = -Infinity;
     for (const node of candidates) {
       if (node.pruned) continue;
-      // UCB1: exploitation (score) + exploration (bonus for less-explored actions)
-      const visits = 1; // Each candidate is visited once during expansion
-      const explorationBonus =
-        this.config.explorationConstant * Math.sqrt(Math.log(parentVisits) / visits);
-      const ucb = node.score + explorationBonus;
-      if (ucb > bestScore) {
-        bestScore = ucb;
+      const u = puctScore(node, parentVisits, c);
+      if (u > bestU) {
+        bestU = u;
         best = node;
       }
     }
-
     return best;
+  }
+
+  /**
+   * Estimate a rollout value in [0,1] without extra LLM calls: the candidate's
+   * prior (LLM confidence blended with the world-model simulation), nudged by a
+   * goal-progress potential, with bounded stochastic exploration so repeated
+   * selections don't collapse onto the prior before statistics build up.
+   */
+  private rolloutValue(node: TreeNode, goalProgress: GoalProgress): number {
+    const potential = 0.8 * node.prior + 0.2 * (goalProgress.progress ?? 0);
+    const jitter = (Math.random() - 0.5) * 0.1;
+    return Math.max(0, Math.min(1, potential + jitter));
+  }
+
+  /** Backpropagate a rollout value up the tree: increment N and accumulate W on
+   *  the selected candidate, then on every ancestor up to the root. */
+  private backpropagate(node: TreeNode, parentId: string, value: number): void {
+    node.visits += 1;
+    node.totalValue += value;
+    let id: string | null = parentId;
+    while (id) {
+      const n = this.tree.get(id);
+      if (!n) break;
+      n.visits += 1;
+      n.totalValue += value;
+      id = n.parentId;
+    }
   }
 
   /**
@@ -556,6 +682,9 @@ Goal progress: ${Math.round(goalProgress.progress * 100)}%`,
       observation: null,
       reflection: null,
       score: candidate.confidence ?? 0.5,
+      prior: candidate.confidence ?? 0.5,
+      visits: 0,
+      totalValue: 0,
       executed: false,
       pruned: false,
       children: [],

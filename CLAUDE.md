@@ -58,7 +58,7 @@ src/
     types.ts            — TreeNode, ComplexityAssessment, ReflexionConstraint, CritiqueResult, etc.
     meta-reasoner.ts    — MetaReasoner: classifies complexity, decides phase skipping
     reflexion.ts        — ReflexionEngine: extracts constraints from claims
-    tree-search.ts      — TreeSearchEngine: MCTS-lite with UCB1 selection
+    tree-search.ts      — TreeSearchEngine: MCTS (PUCT selection + value backpropagation)
     self-critique.ts    — SelfCritique: validates responses, rewrites if rejected
     world-model.ts      — WorldModel: simulates action outcomes, predicts risk
 
