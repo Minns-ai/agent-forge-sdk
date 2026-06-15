@@ -90,7 +90,7 @@ The `runtime/` module is how a deployed agent talks to the minns control plane,
 split into two decoupled tiers:
 
 - **Instrument / "observed by us"** — `TelemetryReporter` (OTLP/JSON GenAI spans
-  tagged with the `minns.agent.id` resource attribute), `LogShipper`, and the
+  tagged with the `minns.agent_id` resource attribute), `LogShipper`, and the
   HTTP approval handler. Driven by the env rails (`readMinnsEnv()`). This is the
   light, framework-agnostic tier — most value (cost/metrics/traces/evals) needs
   only this, no durable runtime.

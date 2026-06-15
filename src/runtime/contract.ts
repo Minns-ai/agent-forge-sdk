@@ -20,8 +20,8 @@
 
 /** Standardized OTel resource attribute carrying the agent id, so telemetry is
  *  attributable with or without the env rails (env rails are a convenience
- *  default, not the only path). */
-export const AGENT_ID_RESOURCE_ATTR = "minns.agent.id" as const;
+ *  default, not the only path). Matches what the minns-opto ingest reads. */
+export const AGENT_ID_RESOURCE_ATTR = "minns.agent_id" as const;
 
 /** Control plane → agent. One turn of a (possibly multi-step) run. */
 export interface InvokeRequest {
