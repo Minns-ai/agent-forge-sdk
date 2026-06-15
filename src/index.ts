@@ -53,6 +53,29 @@ export { OpenAIProvider } from "./llm/openai-provider.js";
 export { AnthropicProvider } from "./llm/anthropic-provider.js";
 export type { OpenAIProviderConfig, AnthropicProviderConfig } from "./llm/types.js";
 
+// ─── LLM usage/cost accounting + resilience ──────────────────────────────────
+export {
+  estimateCost,
+  pricingFor,
+  registerModelPricing,
+  makeUsage,
+  emptyUsage,
+  UsageAccumulator,
+} from "./llm/usage.js";
+export type { TokenUsage, ModelPricing, UsageSink } from "./llm/usage.js";
+export {
+  withRetry,
+  isTransientError,
+  CircuitBreaker,
+  createResilientRunner,
+} from "./llm/resilience.js";
+export type {
+  RetryOptions,
+  CircuitBreakerOptions,
+  CircuitState,
+  ResilienceConfig,
+} from "./llm/resilience.js";
+
 // ─── Session ─────────────────────────────────────────────────────────────────
 export { InMemorySessionStore } from "./session/in-memory-store.js";
 

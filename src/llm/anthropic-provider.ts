@@ -1,6 +1,24 @@
 import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMToolSpec, LLMToolResponse, LLMToolCall } from "../types.js";
 import type { AnthropicProviderConfig } from "./types.js";
 import { LLMError } from "../errors.js";
+import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
+import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
+
+/** Extract normalized usage from an Anthropic messages response. Anthropic
+ *  reports cache-read and cache-creation separately from input_tokens. */
+function usageFromAnthropic(model: string, response: any): TokenUsage {
+  const u = response?.usage ?? {};
+  const cacheRead = u.cache_read_input_tokens ?? 0;
+  const cacheCreation = u.cache_creation_input_tokens ?? 0;
+  return makeUsage({
+    provider: "anthropic",
+    model,
+    inputTokens: (u.input_tokens ?? 0) + cacheRead + cacheCreation,
+    outputTokens: u.output_tokens ?? 0,
+    cachedInputTokens: cacheRead,
+    cacheCreationTokens: cacheCreation,
+  });
+}
 
 /**
  * Native Anthropic provider using @anthropic-ai/sdk (optional peer dependency).
@@ -17,6 +35,9 @@ export class AnthropicProvider implements LLMProvider {
   private readonly model: string;
   private readonly maxTokens: number;
   private readonly temperature: number;
+  private readonly timeoutMs: number;
+  private readonly onUsage?: UsageSink;
+  private readonly run: <T>(fn: () => Promise<T>) => Promise<T>;
   private client: any = null;
 
   constructor(config: AnthropicProviderConfig) {
@@ -24,6 +45,9 @@ export class AnthropicProvider implements LLMProvider {
     this.model = config.model ?? "claude-sonnet-4-5-20250929";
     this.maxTokens = config.maxTokens ?? 2048;
     this.temperature = config.temperature ?? 0.7;
+    this.timeoutMs = config.timeoutMs ?? 60_000;
+    this.onUsage = config.onUsage;
+    this.run = createResilientRunner(config.resilience as ResilienceConfig | undefined);
   }
 
   private getClient(): any {
@@ -122,14 +146,21 @@ export class AnthropicProvider implements LLMProvider {
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
 
     try {
-      const response = await client.messages.create({
-        model: this.model,
-        max_tokens: options?.maxTokens ?? this.maxTokens,
-        temperature: options?.temperature ?? this.temperature,
-        system: system || undefined,
-        messages: msgs,
-        ...(options?.stop ? { stop_sequences: options.stop } : {}),
-      });
+      const response: any = await this.run(() =>
+        client.messages.create(
+          {
+            model: this.model,
+            max_tokens: options?.maxTokens ?? this.maxTokens,
+            temperature: options?.temperature ?? this.temperature,
+            system: system || undefined,
+            messages: msgs,
+            ...(options?.stop ? { stop_sequences: options.stop } : {}),
+          },
+          // Per-call timeout; disable the SDK's own retries (we own resilience).
+          { timeout: this.timeoutMs, maxRetries: 0 },
+        ),
+      );
+      this.onUsage?.(usageFromAnthropic(this.model, response));
 
       const content = response.content
         ?.filter((block: any) => block.type === "text")
@@ -170,15 +201,22 @@ export class AnthropicProvider implements LLMProvider {
     }));
 
     try {
-      const response = await client.messages.create({
-        model: this.model,
-        max_tokens: options?.maxTokens ?? this.maxTokens,
-        temperature: options?.temperature ?? this.temperature,
-        system: system || undefined,
-        messages: msgs,
-        tools: anthropicTools,
-        ...(options?.stop ? { stop_sequences: options.stop } : {}),
-      });
+      const response: any = await this.run(() =>
+        client.messages.create(
+          {
+            model: this.model,
+            max_tokens: options?.maxTokens ?? this.maxTokens,
+            temperature: options?.temperature ?? this.temperature,
+            system: system || undefined,
+            messages: msgs,
+            tools: anthropicTools,
+            ...(options?.stop ? { stop_sequences: options.stop } : {}),
+          },
+          { timeout: this.timeoutMs, maxRetries: 0 },
+        ),
+      );
+      const usage = usageFromAnthropic(this.model, response);
+      this.onUsage?.(usage);
 
       // Extract text content and tool calls from content blocks
       let textContent: string | null = null;
@@ -208,6 +246,7 @@ export class AnthropicProvider implements LLMProvider {
         content: textContent?.trim() || null,
         toolCalls,
         stopReason,
+        usage,
       };
     } catch (error) {
       if (error instanceof LLMError) throw error;

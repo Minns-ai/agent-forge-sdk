@@ -116,6 +116,8 @@ export interface LLMToolResponse {
   toolCalls: LLMToolCall[];
   /** Why the LLM stopped generating */
   stopReason: "end_turn" | "tool_use" | "max_tokens";
+  /** Token usage + estimated cost for this call, when the provider reports it. */
+  usage?: import("./llm/usage.js").TokenUsage;
 }
 
 export interface LLMProvider {
