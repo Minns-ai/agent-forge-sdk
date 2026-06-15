@@ -33,5 +33,8 @@ export type { HttpApprovalConfig } from "./approval.js";
 export { createGraphStepHandler } from "./durable.js";
 export type { StepHandler, GraphStepHandlerConfig } from "./durable.js";
 
+export { fetchAgentPrompt, PromptProvider } from "./prompt.js";
+export type { AgentPromptConfig } from "./prompt.js";
+
 export { serveAgent } from "./serve.js";
 export type { ServeAgentOptions, AgentServer } from "./serve.js";
