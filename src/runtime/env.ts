@@ -7,7 +7,7 @@
 //   MINNS_LOGS_URL         log shipping endpoint
 //   MINNS_APPROVAL_URL     human-approval request endpoint (synchronous tier)
 //   MINNS_TELEMETRY_TOKEN  per-instance bearer for all three
-//   MINNS_AGENT_ID         the instance id; tags telemetry as minns.agent.id
+//   MINNS_AGENT_ID         the instance id; tags telemetry as minns.agent_id
 //   MINNS_PROMPT_URL       current (opto-optimized) prompt/model for this agent
 
 export interface MinnsRails {
