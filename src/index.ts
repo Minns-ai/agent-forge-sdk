@@ -96,6 +96,13 @@ export { wrapLegacyClient, isMemoryIntegration } from "./memory/adapter.js";
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 export { ToolRegistry } from "./tools/tool-registry.js";
+export {
+  registerMcpServer,
+  mcpToolDefinitions,
+  connectMcp,
+  assertPublicHttpUrl,
+} from "./tools/mcp/index.js";
+export type { McpConnection, McpServerConfig, McpToolInfo } from "./tools/mcp/index.js";
 export { searchMemoriesTool } from "./tools/builtin/search-memories.js";
 export { storeFactTool } from "./tools/builtin/store-fact.js";
 export { reportFailureTool } from "./tools/builtin/report-failure.js";
