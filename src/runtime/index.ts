@@ -13,7 +13,7 @@ export type {
   RunStepStatus,
 } from "./contract.js";
 
-export { readMinnsEnv } from "./env.js";
+export { readMinnsEnv, readMcpServersFromEnv } from "./env.js";
 export type { MinnsRails } from "./env.js";
 
 export {

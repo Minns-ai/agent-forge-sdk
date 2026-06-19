@@ -16,6 +16,9 @@ export interface McpServerConfig {
   transport?: "http" | "sse";
   /** Extra headers (e.g. Authorization) sent with every request. */
   headers?: Record<string, string>;
+  /** If set, only these tool names from the server are exposed to the agent
+   *  (per-agent allowlist). Empty/undefined exposes all of the server's tools. */
+  allowTools?: string[];
 }
 
 export interface McpToolInfo {

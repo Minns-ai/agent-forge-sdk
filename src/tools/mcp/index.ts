@@ -30,9 +30,12 @@ function paramsFromSchema(schema: McpToolInfo["inputSchema"]): Record<string, To
   return out;
 }
 
-/** Wrap a connected MCP server's tools as agent-forge ToolDefinitions. */
+/** Wrap a connected MCP server's tools as agent-forge ToolDefinitions. When the
+ *  server config carries an allowTools list, only those tools are exposed. */
 export function mcpToolDefinitions(conn: McpConnection): ToolDefinition[] {
-  return conn.tools.map((t) => ({
+  const allow = conn.config.allowTools;
+  const tools = allow && allow.length ? conn.tools.filter((t) => allow.includes(t.name)) : conn.tools;
+  return tools.map((t) => ({
     name: t.name,
     description: t.description ?? `MCP tool '${t.name}' from ${conn.config.name}`,
     parameters: paramsFromSchema(t.inputSchema),
