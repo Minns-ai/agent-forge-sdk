@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
 
+# The commit-the-bump step pushes the release back to main, so the job needs
+# write access to repo contents.
+permissions:
+  contents: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
