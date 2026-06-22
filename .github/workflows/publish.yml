@@ -29,12 +29,31 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Bump patch version
-        run: npm version patch --no-git-tag-version
+      # Bump to the next patch ABOVE whatever npm already has, so the published
+      # version is always fresh even if the repo's package.json drifted behind
+      # the registry (the previous setup never committed the bump back, so it
+      # got stuck re-publishing the same version).
+      - name: Bump version above the npm latest
+        run: |
+          PKG=$(node -p "require('./package.json').name")
+          LATEST=$(npm view "$PKG" version 2>/dev/null || echo "0.0.0")
+          npm version "$LATEST" --no-git-tag-version --allow-same-version >/dev/null 2>&1 || true
+          npm version patch --no-git-tag-version
+          echo "NEW_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
 
       - name: Publish to npm
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Persist the bump so the repo tracks the registry and the next run starts
+      # from the right place. [skip ci] avoids re-triggering this workflow.
+      - name: Commit the version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json 2>/dev/null || git add package.json
+          git commit -m "release: v${NEW_VERSION} [skip ci]" || exit 0
+          git push origin HEAD:main
 
      
