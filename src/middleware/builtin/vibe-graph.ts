@@ -12,6 +12,7 @@ import { AgentGraph } from "../../graph/graph.js";
 import { END } from "../../graph/types.js";
 import type { NodeFunction, GraphEvent, InvokeResult } from "../../graph/types.js";
 import { safeJsonParse } from "../../utils/json.js";
+import { SimpleAgent } from "../../simple-agent.js";
 
 // ─── Intermediate Representation ─────────────────────────────────────────────
 
@@ -253,7 +254,30 @@ export function buildAgentGraph(
       ];
 
       try {
-        const raw = await llm.complete(messages, { maxTokens: 1000 });
+        let raw: string;
+        if (parentTools && parentTools.length > 0) {
+          // Tool-enabled node: run a tool-using agent with this node's role, so
+          // the node can actually search / act (call tools), not just reason.
+          const nodeAgent = new SimpleAgent({
+            directive: {
+              identity: node.instructions,
+              goalDescription:
+                "Produce these outputs: " +
+                node.outputFields.join(", ") +
+                ". When done, respond with JSON containing those fields.",
+              maxIterations: 8,
+            },
+            llm,
+            tools: parentTools,
+          });
+          const task =
+            state.userInput +
+            (inputContext ? "\n\nContext from previous steps:\n" + inputContext : "");
+          const r = await nodeAgent.run(task);
+          raw = r.message ?? "";
+        } else {
+          raw = await llm.complete(messages, { maxTokens: 1000 });
+        }
         const parsed = safeJsonParse<Record<string, any>>(raw);
 
         // Merge outputs into state.data
