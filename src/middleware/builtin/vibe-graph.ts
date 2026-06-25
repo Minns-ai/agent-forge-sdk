@@ -138,7 +138,7 @@ Rules:
  * Run the 3-stage Vibe Graphing pipeline to compile a natural language
  * description into a VibeGraphIR.
  */
-async function compileVibeGraph(
+export async function compileVibeGraph(
   description: string,
   llm: LLMProvider,
   modelCall?: NextFn,
@@ -219,7 +219,7 @@ async function compileVibeGraph(
 /**
  * Compile a VibeGraphIR into an executable AgentGraph.
  */
-function buildAgentGraph(
+export function buildAgentGraph(
   ir: VibeGraphIR,
   llm: LLMProvider,
   parentTools?: ToolDefinition[],
