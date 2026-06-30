@@ -50,17 +50,25 @@ export class AnthropicProvider implements LLMProvider {
     this.run = createResilientRunner(config.resilience as ResilienceConfig | undefined);
   }
 
-  private getClient(): any {
+  private async getClient(): Promise<any> {
     if (!this.client) {
       try {
-        // Dynamic import to avoid hard dependency
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const Anthropic = require("@anthropic-ai/sdk");
-        this.client = new Anthropic.default({ apiKey: this.apiKey });
-      } catch {
-        throw new LLMError(
-          "@anthropic-ai/sdk is not installed. Install it with: npm install @anthropic-ai/sdk",
-        );
+        // ESM dynamic import (this package is "type": "module", so a CommonJS
+        // require() throws ReferenceError here). Works for both the CJS and ESM
+        // builds of @anthropic-ai/sdk; the SDK class is the module's default export.
+        const mod: any = await import("@anthropic-ai/sdk");
+        const Anthropic = mod.default ?? mod;
+        this.client = new Anthropic({ apiKey: this.apiKey });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Only claim "not installed" when the module genuinely can't be resolved;
+        // otherwise surface the real cause instead of mislabeling it.
+        if (/cannot find (module|package)|ERR_MODULE_NOT_FOUND/i.test(msg)) {
+          throw new LLMError(
+            "@anthropic-ai/sdk is not installed. Install it with: npm install @anthropic-ai/sdk",
+          );
+        }
+        throw new LLMError(`Failed to load @anthropic-ai/sdk: ${msg}`);
       }
     }
     return this.client;
@@ -141,7 +149,7 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<string> {
-    const client = this.getClient();
+    const client = await this.getClient();
     const enableCaching = options?.metadata?.enable_prompt_caching === true;
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
 
@@ -189,7 +197,7 @@ export class AnthropicProvider implements LLMProvider {
     tools: LLMToolSpec[],
     options?: LLMCompletionOptions,
   ): Promise<LLMToolResponse> {
-    const client = this.getClient();
+    const client = await this.getClient();
     const enableCaching = options?.metadata?.enable_prompt_caching === true;
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
 
@@ -255,7 +263,7 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async *stream(messages: LLMMessage[], options?: LLMCompletionOptions): AsyncGenerator<LLMStreamChunk> {
-    const client = this.getClient();
+    const client = await this.getClient();
     const enableCaching = options?.metadata?.enable_prompt_caching === true;
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
 

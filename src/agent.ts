@@ -57,12 +57,17 @@ export class AgentForge {
   private config: AgentForgeConfig;
   private sessionStore: AgentForgeConfig["sessionStore"];
   private runner: AdaptiveRunner;
+  // Lazy async init (memoryApiKey → minns-sdk, which is ESM-only and must be
+  // dynamically imported). Resolved once, before the first run.
+  private initPromise: Promise<void> | null = null;
 
   constructor(config: AgentForgeConfig) {
     this.config = config;
     this.sessionStore = config.sessionStore ?? new InMemorySessionStore();
 
-    // ── Resolve memory provider ─────────────────────────────────────────
+    // ── Resolve memory provider (synchronous paths only) ────────────────
+    // A passed memory provider/client resolves now. The memoryApiKey path loads
+    // minns-sdk (ESM-only) asynchronously in ensureInit() before the first run.
     let memoryProvider: MemoryIntegration | null = null;
     let legacyClient: any = null;
 
@@ -74,37 +79,56 @@ export class AgentForge {
         memoryProvider = wrapLegacyClient(config.memory);
         legacyClient = config.memory;
       }
-    } else if (config.memoryApiKey) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { createClient } = require("minns-sdk");
-        const client = createClient(config.memoryApiKey);
-        memoryProvider = new MinnsMemory({ client });
-        legacyClient = client;
-      } catch {
-        // minns-sdk not installed
-      }
     }
 
+    this.runner = this.buildRunner(memoryProvider, legacyClient);
+  }
+
+  /** Build the execution runner with the given memory binding. Called from the
+   *  constructor (sync memory) and again from ensureInit() once an async
+   *  memoryApiKey provider has resolved. */
+  private buildRunner(
+    memoryProvider: MemoryIntegration | null,
+    legacyClient: any,
+  ): AdaptiveRunner {
     const allTools = [
       ...(legacyClient ? BUILTIN_TOOLS : []),
-      ...(config.tools ?? []),
+      ...(this.config.tools ?? []),
     ];
-
-    this.runner = new AdaptiveRunner({
-      directive: config.directive,
-      llm: config.llm,
+    return new AdaptiveRunner({
+      directive: this.config.directive,
+      llm: this.config.llm,
       client: legacyClient,
       memoryProvider,
-      agentId: config.agentId,
+      agentId: this.config.agentId,
       tools: allTools,
-      goalChecker: config.goalChecker,
-      maxHistory: config.maxHistory,
-      reasoning: config.reasoning,
-      subAgents: config.subAgents,
-      services: config.services,
-      middleware: config.middleware,
+      goalChecker: this.config.goalChecker,
+      maxHistory: this.config.maxHistory,
+      reasoning: this.config.reasoning,
+      subAgents: this.config.subAgents,
+      services: this.config.services,
+      middleware: this.config.middleware,
     });
+  }
+
+  /** Resolve a memoryApiKey-based provider (minns-sdk is ESM, so dynamically
+   *  imported) and rebuild the runner with it. Idempotent; a no-op when memory
+   *  was supplied directly or no key is set. */
+  private async ensureInit(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = (async () => {
+      if (this.config.memory || !this.config.memoryApiKey) return;
+      try {
+        const mod: any = await import("minns-sdk");
+        const createClient = mod.createClient ?? mod.default?.createClient;
+        if (typeof createClient !== "function") return;
+        const client = createClient(this.config.memoryApiKey);
+        this.runner = this.buildRunner(new MinnsMemory({ client }), client);
+      } catch {
+        // minns-sdk not available — continue without memory.
+      }
+    })();
+    return this.initPromise;
   }
 
   /**
@@ -112,6 +136,7 @@ export class AgentForge {
    * Returns the full PipelineResult.
    */
   async run(message: string, options: RunOptions): Promise<PipelineResult> {
+    await this.ensureInit();
     const sessionKey = this.getSessionKey(options);
     const sessionState = await this.getOrCreateSession(sessionKey);
 
@@ -132,6 +157,7 @@ export class AgentForge {
    * Stream the agent pipeline as an async generator of AgentEvents.
    */
   async *stream(message: string, options: RunOptions): AsyncGenerator<AgentEvent> {
+    await this.ensureInit();
     const sessionKey = this.getSessionKey(options);
     const sessionState = await this.getOrCreateSession(sessionKey);
     const emitter = new AgentEventEmitter();
@@ -164,6 +190,7 @@ export class AgentForge {
     handler: EventHandler,
     options: RunOptions,
   ): Promise<PipelineResult> {
+    await this.ensureInit();
     const sessionKey = this.getSessionKey(options);
     const sessionState = await this.getOrCreateSession(sessionKey);
     const emitter = new AgentEventEmitter();

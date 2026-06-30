@@ -1,5 +1,10 @@
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 import { canonicalizeJson } from "./json.js";
+
+// This package is ESM ("type": "module"), where the bare `require` is undefined.
+// createRequire gives a working require for the optional native dep below.
+const require = createRequire(import.meta.url);
 
 /**
  * Compute a numeric fingerprint for a context object.
