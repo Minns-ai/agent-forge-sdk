@@ -7,6 +7,7 @@ import type {
   GoalChecker,
   GoalProgress,
   ToolDefinition,
+  ToolResult,
   ToolContext,
   MemorySnapshot,
   PipelineResult,
@@ -246,6 +247,13 @@ export class AdaptiveRunner {
   // Middleware
   private middlewareStack: MiddlewareStack;
 
+  // Orchestrator-worker delegation (SOTA multi-agent pattern): named workers the
+  // orchestrator can hand isolated subtasks to via the `delegate` tool.
+  private subAgentDefs = new Map<string, SubAgentDefinition>();
+  private parentTools: ToolDefinition[] = [];
+  private activeDelegations = 0;
+  private maxConcurrentDelegations = 4;
+
   constructor(params: {
     directive: Directive;
     llm: LLMProvider;
@@ -306,10 +314,97 @@ export class AdaptiveRunner {
       ? new SelfCritique(params.llm)
       : null;
 
-    // Sub-agents
+    // Sub-agents (orchestrator-worker). Register the workers and expose a real
+    // `delegate` tool so the orchestrator LLM can hand a subtask to a named
+    // worker that runs in its OWN isolated context and returns a concise result.
+    // (Previously `subAgents` only fed a SubAgentRunner whose execute() was never
+    // called, so configured sub-agents did nothing.)
     this.subAgentRunner = new SubAgentRunner(params.llm, params.client);
     if (params.subAgents?.length) {
       this.subAgentRunner.registerAll(params.subAgents);
+      for (const sa of params.subAgents) this.subAgentDefs.set(sa.name, sa);
+      this.parentTools = params.tools;
+      this.toolRegistry.register(this.buildDelegateTool());
+    }
+  }
+
+  /** The `delegate` tool: the orchestrator delegates a self-contained subtask to
+   *  a named worker. Each worker runs in an isolated context and returns a
+   *  concise summary, so the orchestrator's own context stays clean. */
+  private buildDelegateTool(): ToolDefinition {
+    const names = [...this.subAgentDefs.keys()];
+    const roster = [...this.subAgentDefs.values()]
+      .map((s) => `- ${s.name}: ${s.directive.identity}`)
+      .join("\n");
+    return {
+      name: "delegate",
+      description:
+        "Delegate a self-contained subtask to a specialist worker that runs in its OWN isolated context and returns a concise result. Use it to parallelize independent work and keep your own context clean. You may call it multiple times in one turn to run workers in parallel.\nWorkers:\n" +
+        roster,
+      parameters: {
+        worker: { type: "string", description: `worker to use, one of: ${names.join(", ")}` },
+        task: {
+          type: "string",
+          description:
+            "the self-contained subtask, including ALL context the worker needs (it cannot see your conversation)",
+        },
+      },
+      execute: async (args: Record<string, unknown>): Promise<ToolResult> =>
+        this.delegateToWorker(String(args.worker ?? ""), String(args.task ?? "")),
+    };
+  }
+
+  /** Run one worker in an isolated scoped runner (fresh context, optional cheaper
+   *  model), bounded by a concurrency cap. Returns its final message as the
+   *  delegation result. */
+  private async delegateToWorker(name: string, task: string): Promise<ToolResult> {
+    const sa = this.subAgentDefs.get(name);
+    if (!sa) {
+      return {
+        success: false,
+        error: `Unknown worker "${name}". Available: ${[...this.subAgentDefs.keys()].join(", ")}`,
+      };
+    }
+    if (!task.trim()) return { success: false, error: "task is required" };
+
+    // Concurrency guard — cap simultaneous workers.
+    while (this.activeDelegations >= this.maxConcurrentDelegations) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    this.activeDelegations++;
+    try {
+      // Worker uses its own model when the definition overrode it (cheaper models
+      // for scoped work), else the orchestrator's. Its tools are the definition's
+      // subset, else the parent's tools minus `delegate` (no unbounded recursion).
+      const workerLlm = sa.llm ?? this.llm;
+      const workerTools = (sa.tools ?? this.parentTools).filter((t) => t.name !== "delegate");
+      const worker = new AdaptiveRunner({
+        directive: {
+          ...sa.directive,
+          goalDescription: task,
+          maxIterations: sa.maxSteps ?? sa.directive.maxIterations ?? 15,
+        },
+        llm: workerLlm,
+        client: this.client,
+        memoryProvider: null, // isolated: workers don't inherit the parent's memory noise
+        agentId: this.agentId,
+        tools: workerTools,
+        reasoning: { adaptiveCompute: false }, // keep workers a lean loop
+      });
+      const session: SessionState = {
+        iterationCount: 0,
+        goalCompleted: false,
+        goalCompletedAt: null,
+        collectedFacts: {},
+        conversationHistory: [],
+        goalDescription: task,
+      };
+      const result = await worker.run(task, session, this.agentId);
+      return { success: true, result: { worker: name, summary: result.message } };
+    } catch (err: any) {
+      return { success: false, error: `Worker "${name}" failed: ${err?.message ?? "unknown error"}` };
+    } finally {
+      this.activeDelegations--;
     }
   }
 
@@ -597,13 +692,22 @@ export class AdaptiveRunner {
               toolCalls: response.toolCalls,
             });
 
-            for (const toolCall of response.toolCalls) {
-              const toolResult = await this.toolRegistry.execute(
-                toolCall.name,
-                toolCall.arguments,
-                toolContext,
-              );
+            // Execute this turn's tool calls CONCURRENTLY — they are independent
+            // by design, so parallel delegations / lookups actually run in
+            // parallel. Results are then processed in the ORIGINAL order so
+            // native tool_use/tool_result pairing stays valid.
+            const executed = await Promise.all(
+              response.toolCalls.map(async (toolCall) => ({
+                toolCall,
+                toolResult: await this.toolRegistry.execute(
+                  toolCall.name,
+                  toolCall.arguments,
+                  toolContext,
+                ),
+              })),
+            );
 
+            for (const { toolCall, toolResult } of executed) {
               allToolResults.push(toolResult);
 
               // Update session facts from tool results
