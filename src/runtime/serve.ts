@@ -4,6 +4,14 @@ import type { StepHandler } from "./durable.js";
 import { readMinnsEnv, type MinnsRails } from "./env.js";
 import { telemetryFromRails, type TelemetryReporter } from "./otlp.js";
 import { logShipperFromRails, type LogShipper } from "./logs.js";
+import {
+  buildAgentCard,
+  messageText,
+  runIdForContext,
+  rpcError,
+  completedTask,
+  type A2ARpcRequest,
+} from "./a2a.js";
 
 // The HTTP harness a deployed agent runs. Exposes the control-plane contract:
 //
@@ -25,6 +33,11 @@ export interface ServeAgentOptions {
   telemetry?: TelemetryReporter | null;
   /** Provide a LogShipper explicitly (otherwise built from the rails). */
   logs?: LogShipper | null;
+  /** Native A2A: name/description for the Agent Card. Defaults to
+   *  MINNS_AGENT_NAME / a generic description. Set `a2a: false` to disable the
+   *  A2A discovery + JSON-RPC endpoints. */
+  card?: { name?: string; description?: string };
+  a2a?: boolean;
 }
 
 export interface AgentServer {
@@ -144,6 +157,59 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
         await telemetry?.flush();
         sendJson(res, 200, result);
         return;
+      }
+
+      // ── Native A2A (Agent2Agent) ─────────────────────────────────────────
+      if (opts.a2a !== false) {
+        const agentName = opts.card?.name ?? env.MINNS_AGENT_NAME ?? "agent";
+        const agentDesc =
+          opts.card?.description ?? `The ${agentName} agent. Send it a task as an A2A message.`;
+
+        if (method === "GET" && url.replace(/\/$/, "") === "/.well-known/agent-card.json") {
+          const host = req.headers.host ?? `localhost:${port}`;
+          const scheme = (req.headers["x-forwarded-proto"] as string) || "http";
+          sendJson(res, 200, buildAgentCard({ name: agentName, description: agentDesc, url: `${scheme}://${host}/a2a` }));
+          return;
+        }
+
+        if (method === "POST" && url.replace(/\/$/, "") === "/a2a") {
+          let rpc: A2ARpcRequest;
+          try {
+            rpc = ((await readJsonBody(req)) ?? {}) as A2ARpcRequest;
+          } catch {
+            sendJson(res, 200, rpcError(null, -32700, "Parse error"));
+            return;
+          }
+          const id = rpc.id ?? null;
+          if (rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string") {
+            sendJson(res, 200, rpcError(id, -32600, "Invalid Request"));
+            return;
+          }
+          if (rpc.method !== "message/send") {
+            sendJson(res, 200, rpcError(id, -32601, `Method not supported: ${rpc.method}`));
+            return;
+          }
+          const input = messageText(rpc);
+          if (!input) {
+            sendJson(res, 200, rpcError(id, -32602, "message must contain a text part"));
+            return;
+          }
+          const contextId = rpc.params?.message?.contextId;
+          const request: InvokeRequest = {
+            run_id: runIdForContext(String(rails.agentId ?? agentName), contextId),
+            input,
+            step: 0,
+            resume: false,
+          };
+          try {
+            const result = await opts.handler(request);
+            sendJson(res, 200, completedTask(id, result.output, contextId));
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            sendJson(res, 200, rpcError(id, -32000, message));
+          }
+          return;
+        }
       }
 
       sendJson(res, 404, { error: "not found" });

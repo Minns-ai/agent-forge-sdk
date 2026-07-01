@@ -38,3 +38,6 @@ export type { AgentPromptConfig } from "./prompt.js";
 
 export { serveAgent } from "./serve.js";
 export type { ServeAgentOptions, AgentServer } from "./serve.js";
+
+export { buildAgentCard, messageText, runIdForContext } from "./a2a.js";
+export type { AgentCardInfo, A2ARpcRequest } from "./a2a.js";
