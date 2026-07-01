@@ -9,14 +9,20 @@ export function defaultGoalChecker(state: SessionState): GoalProgress {
     return { completed: true, progress: 1.0 };
   }
 
+  // A tool-using agent is "done" when it STOPS calling tools and gives a final
+  // answer — the loop detects that naturally, with maxIterations as the safety
+  // cap. Do NOT force completion from an iteration count: that truncates real
+  // work mid-task (the previous `iterCount >= 10` did exactly this). Report a
+  // soft progress signal for telemetry, but never self-complete without a real
+  // goal signal or a caller-supplied goalChecker.
   const factCount = Object.keys(state.collectedFacts ?? {}).length;
   const iterCount = state.iterationCount ?? 0;
   const factProgress = Math.min(0.8, factCount * 0.2);
-  const iterProgress = Math.min(0.2, iterCount * 0.02);
-  const progress = Math.min(1.0, factProgress + iterProgress);
+  const iterProgress = Math.min(0.15, iterCount * 0.02);
+  const progress = Math.min(0.95, factProgress + iterProgress);
 
   return {
-    completed: iterCount >= 10,
+    completed: false,
     progress,
   };
 }

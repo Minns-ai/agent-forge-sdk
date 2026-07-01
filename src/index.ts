@@ -5,6 +5,11 @@ export * from "./runtime/index.js";
 export { AgentForge } from "./agent.js";
 export { SimpleAgent } from "./simple-agent.js";
 export type { SimpleAgentConfig } from "./simple-agent.js";
+export {
+  compactMessages,
+  estimateTokens,
+  type CompactionOptions,
+} from "./pipeline/context-compaction.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export type {

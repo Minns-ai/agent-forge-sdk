@@ -42,6 +42,7 @@ import { SubAgentRunner } from "../subagent/sub-agent.js";
 // Legacy phases (used only in graph pipeline path)
 import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
 import { defaultGoalChecker } from "./phases/goal-check-phase.js";
+import { compactMessages } from "./context-compaction.js";
 
 // ─── Heuristic Router ─────────────────────────────────────────────────────────
 
@@ -572,13 +573,19 @@ export class AdaptiveRunner {
     }
 
     // ── Tool-calling loop ────────────────────────────────────────────────
-    const maxSteps = this.directive.maxIterations ?? 10;
+    // Safety cap only — the agent terminates naturally when it stops calling
+    // tools (a real, task-driven signal). 25 gives long-horizon tasks room to
+    // finish; the old default of 10 truncated real work.
+    const maxSteps = this.directive.maxIterations ?? 25;
     let responseText = "";
 
     if (this.llm.completeWithTools && toolSpecs.length > 0) {
       // Native tool calling path
       for (let step = 0; step < maxSteps; step++) {
         try {
+          // Context engineering ("compress"): keep the growing transcript inside
+          // the window on long runs so it never overflows mid-task.
+          messages = compactMessages(messages);
           const response = await this.llm.completeWithTools(messages, toolSpecs);
 
           // Process any tool calls
