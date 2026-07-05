@@ -11,10 +11,26 @@ import { safeJsonParse } from "./utils/json.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
+/** One parsed step of the agent's loop, surfaced to onStep as it happens. */
+export interface SimpleAgentStep {
+  /** 0-based loop iteration. */
+  index: number;
+  /** The parsed action: "use_tool", "done", or whatever the LLM returned. */
+  action: string;
+  /** Tool about to be executed (action === "use_tool"). */
+  toolName?: string;
+  /** The LLM's stated reasoning for this step. */
+  reasoning?: string;
+}
+
 export interface SimpleAgentConfig {
   directive: Pick<Directive, "identity" | "goalDescription"> & { maxIterations?: number };
   llm: LLMProvider;
   tools: ToolDefinition[];
+  /** Called with each parsed step BEFORE it executes — for streaming the
+   *  agent's live reasoning to a UI. Errors thrown here are swallowed; the
+   *  hook can never break the loop. */
+  onStep?: (step: SimpleAgentStep) => void;
 }
 
 // ─── Prompt builders (self-contained) ────────────────────────────────────────
@@ -149,6 +165,17 @@ export class SimpleAgent {
 
       if (parsed.reasoning) {
         reasoning.push(`Step ${step + 1}: ${parsed.reasoning}`);
+      }
+
+      try {
+        this.config.onStep?.({
+          index: step,
+          action: parsed.action,
+          ...(parsed.tool_name ? { toolName: parsed.tool_name } : {}),
+          ...(parsed.reasoning ? { reasoning: parsed.reasoning } : {}),
+        });
+      } catch {
+        /* observer errors never break the loop */
       }
 
       // ── Done ──────────────────────────────────────────────────────────
