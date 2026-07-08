@@ -156,6 +156,13 @@ export interface CompileOptions<S> {
    * When reached, the graph checkpoints state and returns with status "interrupted".
    */
   interruptAfter?: string[];
+  /**
+   * Live observer for every GraphEvent (node_start/node_end/edge/interrupt/
+   * complete/error), called as execution happens — for streaming a graph run's
+   * progress to a UI. Errors thrown here are swallowed; the observer can never
+   * break the run.
+   */
+  onEvent?: (event: GraphEvent) => void;
 }
 
 // ─── Invoke Config ──────────────────────────────────────────────────────────

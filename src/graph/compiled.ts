@@ -50,12 +50,14 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
   private checkpointer: Checkpointer<S> | null;
   private interruptBefore: Set<string>;
   private interruptAfter: Set<string>;
+  private onEvent: ((event: GraphEvent) => void) | null;
 
   constructor(definition: GraphDefinition<S>, options?: CompileOptions<S>) {
     this.definition = definition;
     this.checkpointer = options?.checkpointer ?? null;
     this.interruptBefore = new Set(options?.interruptBefore ?? []);
     this.interruptAfter = new Set(options?.interruptAfter ?? []);
+    this.onEvent = options?.onEvent ?? null;
   }
 
   /**
@@ -242,6 +244,11 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
 
     const emitEvent = (event: GraphEvent) => {
       eventSink?.push(event);
+      try {
+        this.onEvent?.(event);
+      } catch {
+        /* observer errors never break the run */
+      }
     };
 
     while (stepCount < maxSteps) {
