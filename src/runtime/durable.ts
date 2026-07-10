@@ -42,6 +42,30 @@ export interface GraphStepHandlerConfig<S> {
  */
 export function createGraphStepHandler<S>(cfg: GraphStepHandlerConfig<S>): StepHandler {
   return async (req: InvokeRequest): Promise<InvokeResponse> => {
+    // Idempotency guard against at-least-once delivery. `graph.invoke()`
+    // auto-resumes ANY invoke whose thread has an interrupted checkpoint — so a
+    // RETRIED first-turn delivery (Temporal retries the step activity after a
+    // lost response / timeout, still `resume:false`) would walk straight
+    // through the approval gate and run the gated node with no human decision.
+    // When the driver is NOT explicitly resuming (`resume !== true`) but an
+    // interrupted checkpoint already exists, re-report that interrupt instead
+    // of invoking. Only an explicit resume (approval granted) advances the run.
+    if (req.resume !== true && typeof cfg.graph.getState === "function") {
+      const cp = await cfg.graph.getState(req.run_id);
+      if (cp?.interrupted) {
+        const node = cp.currentNode ?? "";
+        const isApproval = !cfg.approvalNodes || cfg.approvalNodes.includes(node);
+        return {
+          output: cfg.toOutput(cp.state),
+          status: "interrupted",
+          done: false,
+          needs_approval: isApproval,
+          approval_reason: isApproval ? `Run paused at "${node}" for approval.` : undefined,
+          interrupted_at: node || undefined,
+        };
+      }
+    }
+
     const result = await cfg.graph.invoke(cfg.toInput(req.input), {
       threadId: req.run_id,
       ...(cfg.maxSteps !== undefined ? { maxSteps: cfg.maxSteps } : {}),

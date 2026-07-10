@@ -151,6 +151,31 @@ describe("durable step contract over HTTP (worker loop semantics)", () => {
     expect(effects).toEqual({ draft: 2, approve: 2, send: 2 });
   });
 
+  it("a RETRIED first-turn delivery does NOT walk through the gate (idempotent)", async () => {
+    const checkpointer = new InMemoryCheckpointer<RunState>();
+    server = await serve(checkpointer, PORT + 5);
+
+    // Step 0 parks at the approval gate.
+    const first = await invokeTurn(PORT + 5, "run-retry", 0, "launch email");
+    expect(first.needs_approval).toBe(true);
+    expect(effects).toEqual({ draft: 1 });
+
+    // Temporal lost the response and retries the SAME step 0 (resume:false)
+    // BEFORE any human decision. This must re-report the interrupt, NOT resume
+    // past the gate and send the email.
+    const retry = await invokeTurn(PORT + 5, "run-retry", 0, "launch email");
+    expect(retry.status).toBe("interrupted");
+    expect(retry.needs_approval).toBe(true);
+    expect(retry.interrupted_at).toBe("approve");
+    // The gated node still has not run — no HITL bypass.
+    expect(effects).toEqual({ draft: 1 });
+
+    // Only an explicit resume (approval granted) advances it.
+    const resumed = await invokeTurn(PORT + 5, "run-retry", 1, "");
+    expect(resumed.done).toBe(true);
+    expect(effects).toEqual({ draft: 1, approve: 1, send: 1 });
+  });
+
   it("an interrupt at a NON-approval node is not an approval pause", async () => {
     const checkpointer = new InMemoryCheckpointer<RunState>();
     server = await serveAgent({
