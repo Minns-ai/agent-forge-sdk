@@ -33,7 +33,8 @@ src/
     in-memory-store.ts  — InMemorySessionStore (LRU, default 10,000 entries)
 
   tools/
-    tool-registry.ts    — ToolRegistry: register, list, execute tools
+    tool.ts             — Capability layer: buildTool() (safe defaults), planToolBatches (concurrency), evaluatePolicy (allow/deny/ask), capResultSize
+    tool-registry.ts    — ToolRegistry: register, disclose (loaded/deferred/search), authorize, safely execute tools (validate → authorize → execute → cap)
     builtin/
       search-memories.ts  — searchMemoriesTool (searchClaims + query)
       store-fact.ts       — storeFactTool (sendMessage)
@@ -126,7 +127,7 @@ No test framework is configured yet. When adding tests, use vitest (ESM-native).
 |-------------|------|---------|
 | `Directive` | `types.ts` | Agent identity, goal, domain, maxIterations |
 | `LLMProvider` | `llm/provider.ts` | Interface with `complete()` and `stream()` methods |
-| `ToolDefinition` | `types.ts` | Tool name, description, parameter schema, execute function |
+| `ToolDefinition` | `types.ts` | Tool name, description, params, execute + optional capability metadata (effect, parallelSafe, validate, checkAccess, defer/alwaysLoad, tier). Build via `buildTool()` for safe defaults |
 | `SessionStore` | `session/session-store.ts` | Interface: `get(key)`, `set(key, state)`, `delete(key)` |
 | `PipelineRunner` | `pipeline/runner.ts` | Orchestrates all phases, manages state, emits events |
 | `AgentForge` | `agent.ts` | Top-level API wrapping PipelineRunner with `run()`, `stream()`, `runWithEvents()` |
@@ -192,6 +193,19 @@ Only these minns-sdk methods are used:
    ```
 2. Import in `src/tools/tool-registry.ts` and add to the built-in tools array
 3. Export from `src/index.ts`
+
+Prefer wrapping the definition in `buildTool({ ... })` so it gets safe defaults and
+declares its capabilities:
+
+- `effect: "read" | "write" | "destructive"` — drives concurrency (reads fan out via
+  `planToolBatches`) and approval (destructive auto-asks unless allowlisted)
+- `validate(params)` — friendly input check (never throw; the registry surfaces the error)
+- `checkAccess(params)` — per-call allow/deny/ask
+- `defer` / `alwaysLoad` — progressive disclosure (hidden until `registry.search` / `find_tools`)
+- `tier: "inproc" | "sandbox" | "remote"` — first-party vs sandboxed/MCP tools
+
+`ToolRegistry.execute` runs validate → authorize (policy + checkAccess + approval) →
+execute → result size-cap, and never throws.
 
 ## CI/CD
 
