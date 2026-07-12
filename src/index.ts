@@ -126,6 +126,12 @@ export {
 } from "./tools/tool.js";
 export type { ToolBatch } from "./tools/tool.js";
 export {
+  extractBaseCommand,
+  interpretCommandExit,
+  isExpectedNonzeroExit,
+} from "./tools/command-semantics.js";
+export type { CommandOutcome } from "./tools/command-semantics.js";
+export {
   registerMcpServer,
   mcpToolDefinitions,
   connectMcp,
