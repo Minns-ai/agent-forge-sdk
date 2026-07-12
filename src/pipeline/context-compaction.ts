@@ -85,7 +85,10 @@ export function gcMessages(messages: LLMMessage[], options: GcOptions = {}): LLM
     // Only worth it if we actually dropped something.
     if (head.length + suffix.length >= messages.length) return messages;
     const result = [...withNote(), ...suffix];
-    if (estimateTokens(result) <= maxTokens || keepRecent === 2) return result;
+    // `keepRecent <= 3` is the last effective iteration whether we started even
+    // (…4,2) or odd (…3,1) — so the hard bound always drops something rather
+    // than stepping past 2 and returning the input unchanged.
+    if (estimateTokens(result) <= maxTokens || keepRecent <= 3) return result;
   }
   return messages;
 }

@@ -204,6 +204,13 @@ async function runNativeToolLoop(params: {
       // transcript and session mutations stay deterministic regardless of
       // execution concurrency.
       const batches = planToolBatches(response.toolCalls, (name) => toolRegistry.get(name));
+      // Synthetic messages a tool asked to inject are deferred until AFTER every
+      // tool-result message for this assistant turn. Native tool calling
+      // requires the assistant(tool_use) message to be followed immediately by
+      // its tool_result messages with nothing in between — injecting a
+      // user/assistant message mid-group breaks pairing on both OpenAI and
+      // Anthropic.
+      const pendingContext: Array<{ role: "user" | "assistant" | "tool"; content: string }> = [];
       for (const batch of batches) {
         const outcomes = batch.parallel
           ? await Promise.all(batch.calls.map(runCall))
@@ -233,19 +240,19 @@ async function runNativeToolLoop(params: {
             claims = [...claims, ...(result.result.claims ?? [])];
           }
 
-          // Any synthetic messages the tool asked to inject (e.g. sub-agent
-          // summaries) precede its tool-result message.
-          for (const m of result.contextMessages ?? []) {
-            messages.push({ role: m.role, content: m.content });
-          }
+          if (result.contextMessages) pendingContext.push(...result.contextMessages);
 
-          // Send tool result back to LLM
+          // Send tool result back to LLM (must directly follow the tool_use).
           messages.push({
             role: "tool",
             content: JSON.stringify(result.success ? result.result : { error: result.error }),
             toolCallId: tc.id,
           });
         }
+      }
+      // Flush deferred synthetic messages once all tool_result blocks are placed.
+      for (const m of pendingContext) {
+        messages.push({ role: m.role, content: m.content });
       }
     } catch (err: any) {
       reasoning.push(err?.message || "Failed to decide next action.");

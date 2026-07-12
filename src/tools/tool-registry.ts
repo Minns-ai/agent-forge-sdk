@@ -124,7 +124,11 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) return { decision: "deny", reason: `Tool not found: ${name}` };
 
-    const policy = evaluatePolicy(tool, opts?.policy);
+    // A caller that wires an approval handler but no explicit policy still opts
+    // into the destructive auto-ask — synthesize an empty policy so it engages
+    // and routes through their approver.
+    const effectivePolicy = opts?.policy ?? (opts?.onApprovalRequired ? {} : undefined);
+    const policy = evaluatePolicy(tool, effectivePolicy);
     if (policy.decision === "deny") return { decision: "deny", reason: policy.reason };
     // A policy `ask` still lets the tool's own check tighten to a deny below,
     // but never loosens an ask back to allow.

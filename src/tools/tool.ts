@@ -152,6 +152,12 @@ export function evaluatePolicy(
   tool: ToolDefinition,
   policy: ToolPolicy | undefined,
 ): PolicyOutcome {
+  // No policy context ⇒ the caller has not opted into gating: allow (the tool's
+  // own checkAccess still runs). This keeps callers that pass no policy — and
+  // therefore wire no approval channel — from auto-denying every destructive
+  // tool with no way to approve. Pass an (even empty) policy to enable the
+  // destructive auto-ask.
+  if (!policy) return { decision: "allow" };
   const name = tool.name;
   const inList = (list: string[] | undefined) =>
     !!list && (list.includes(name) || list.includes("*"));
@@ -196,7 +202,10 @@ export function capResultSize(result: ToolResult, maxBytes: number | undefined):
   if (serialized === undefined) return result;
   const bytes = Buffer.byteLength(serialized);
   if (bytes <= maxBytes) return result;
-  const preview = serialized.slice(0, maxBytes);
+  // Slice by BYTES, not UTF-16 code units, so the preview actually honours the
+  // byte cap on multi-byte (CJK/emoji) text. A split trailing codepoint decodes
+  // to U+FFFD — fine for a preview.
+  const preview = Buffer.from(serialized, "utf8").subarray(0, maxBytes).toString("utf8");
   return {
     ...result,
     truncated: true,

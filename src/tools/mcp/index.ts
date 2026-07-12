@@ -52,8 +52,10 @@ export function mcpToolDefinitions(conn: McpConnection): ToolDefinition[] {
       description: t.description ?? `MCP tool '${t.name}' from ${conn.config.name}`,
       parameters: paramsFromSchema(t.inputSchema),
       effect,
-      // Only fan out remote calls the server itself marks read-only.
-      parallelSafe: a?.readOnlyHint === true,
+      // Derive from the RESOLVED effect, not the raw hint — a server that sends
+      // both readOnlyHint and destructiveHint resolves to destructive and must
+      // not be fanned out concurrently.
+      parallelSafe: effect === "read",
       tier: "remote",
       tags: ["mcp", conn.config.name],
       execute: async (params: Record<string, unknown>) => {
