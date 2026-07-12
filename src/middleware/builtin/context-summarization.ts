@@ -33,7 +33,9 @@ export interface ContextSummarizationConfig {
   trigger?: ContextSize;
   /** How many recent messages to keep after summarization. Default: ["fraction", 0.10]. */
   keep?: ContextSize;
-  /** Max tokens for the summary LLM call. Default: 500. */
+  /** Max tokens for the summary LLM call. Default: 2048 — the structured
+   *  9-section summary preserves verbatim code + all user messages, so it needs
+   *  materially more room than a one-paragraph gist. */
   summaryMaxTokens?: number;
   /** LLM call purposes to skip. Default: ["summarization"]. */
   skipPurposes?: string[];
@@ -131,16 +133,31 @@ function isSummaryMessage(msg: LLMMessage): boolean {
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
+// Structured, high-fidelity summary. A generic "be concise" summary drops the
+// details that matter for faithful continuation (the exact user asks, verbatim
+// code, the precise current task). This structure — proven in production agent
+// harnesses — forces the model to retain intent, all user messages, code, and
+// an anti-drift statement of the current task, so a run continues across a
+// context reset without losing the thread. Each section is MANDATORY.
 const SUMMARIZATION_PROMPT =
-  "You are a conversation summarizer. Create a concise but comprehensive summary " +
-  "that preserves all critical information needed for the agent to continue working.\n\n" +
-  "Preserve:\n" +
-  "- Key facts, decisions, and outcomes\n" +
-  "- User preferences and constraints\n" +
-  "- What tools were used and their results\n" +
-  "- Pending tasks or goals\n" +
-  "- The user's original request and refinements\n\n" +
-  "Be concise. Format as structured sections.\n\n" +
+  "You are compacting a long agent conversation into a summary that REPLACES the " +
+  "older transcript. The agent must be able to continue seamlessly from your " +
+  "summary alone, so completeness beats brevity. Produce these sections, in order, " +
+  "every one present even if you write \"(none)\":\n\n" +
+  "1. Primary Request and Intent — every explicit user request and the overall goal, in detail.\n" +
+  "2. Key Technical Concepts — technologies, frameworks, and approaches in play.\n" +
+  "3. Files and Code Sections — each file created/modified, WHY it matters, and the " +
+  "important code VERBATIM (exact snippets, signatures, identifiers — not paraphrases).\n" +
+  "4. Errors and Fixes — every error hit and exactly how it was resolved (and any user " +
+  "correction that led to the fix).\n" +
+  "5. Problem Solving — what was solved and any ongoing troubleshooting.\n" +
+  "6. All User Messages — list EVERY non-tool-result user message verbatim. This is " +
+  "critical: it is the record of what the user actually asked and corrected.\n" +
+  "7. Pending Tasks — anything explicitly asked for that is not yet done.\n" +
+  "8. Current Work — precisely what was being done immediately before this summary, " +
+  "with file names and code snippets.\n" +
+  "9. Next Step — the immediate next action, if any, with a DIRECT QUOTE of the most " +
+  "recent task-defining message so intent does not drift.\n\n" +
   "Summarize the following conversation:";
 
 const COMPACT_TOOL_SYSTEM_PROMPT =
@@ -217,7 +234,7 @@ export class ContextSummarizationMiddleware implements Middleware {
     this.tokenBudget = config.tokenBudget ?? 100_000;
     this.trigger = config.trigger ?? ["fraction", 0.85];
     this.keep = config.keep ?? ["fraction", 0.10];
-    this.summaryMaxTokens = config.summaryMaxTokens ?? 500;
+    this.summaryMaxTokens = config.summaryMaxTokens ?? 2048;
     this.skipPurposes = new Set(config.skipPurposes ?? ["summarization"]);
 
     // Tier 1 defaults
