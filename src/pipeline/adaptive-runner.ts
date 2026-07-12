@@ -3,6 +3,7 @@ import type {
   LLMProvider,
   LLMMessage,
   LLMToolSpec,
+  LLMToolResponse,
   SessionState,
   GoalChecker,
   GoalProgress,
@@ -24,6 +25,7 @@ import type {
 import { resolveDirective } from "../directive/directive.js";
 import { PipelineTimer } from "../utils/timer.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
+import { planToolBatches } from "../tools/tool.js";
 import { AgentEventEmitter } from "../events/emitter.js";
 import { MiddlewareStack } from "../middleware/stack.js";
 
@@ -44,6 +46,7 @@ import { SubAgentRunner } from "../subagent/sub-agent.js";
 import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
 import { defaultGoalChecker } from "./phases/goal-check-phase.js";
 import { compactMessages } from "./context-compaction.js";
+import { isContextLengthError, recoverContext, MAX_CONTEXT_RECOVERY } from "./context-recovery.js";
 
 // ─── Heuristic Router ─────────────────────────────────────────────────────────
 
@@ -621,6 +624,31 @@ export class AdaptiveRunner {
    * Single system prompt + tool-calling loop. The model handles everything
    * in its own reasoning. Typically 1-2 LLM calls.
    */
+  /**
+   * `completeWithTools` with a reactive context-length net. On a prompt-too-long
+   * rejection it shrinks the transcript (`recoverContext`) and retries up to
+   * {@link MAX_CONTEXT_RECOVERY} times; any other error, or exhausted retries,
+   * rethrows. Returns the response together with the possibly-shrunk messages,
+   * so the caller keeps using the smaller transcript going forward.
+   */
+  private async completeWithToolsRecovering(
+    messages: LLMMessage[],
+    toolSpecs: LLMToolSpec[],
+  ): Promise<{ response: LLMToolResponse; messages: LLMMessage[] }> {
+    let current = messages;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await this.llm.completeWithTools!(current, toolSpecs);
+        return { response, messages: current };
+      } catch (err) {
+        if (!isContextLengthError(err) || attempt >= MAX_CONTEXT_RECOVERY) throw err;
+        const shrunk = recoverContext(current, attempt);
+        if (shrunk === current) throw err; // couldn't shrink further — give up
+        current = shrunk;
+      }
+    }
+  }
+
   private async runAgenticLoop(
     message: string,
     sessionState: SessionState,
@@ -679,9 +707,13 @@ export class AdaptiveRunner {
       for (let step = 0; step < maxSteps; step++) {
         try {
           // Context engineering ("compress"): keep the growing transcript inside
-          // the window on long runs so it never overflows mid-task.
+          // the window on long runs so it never overflows mid-task. Proactive
+          // compaction uses a token estimate; the call below adds a REACTIVE net
+          // that shrinks harder if the provider still rejects it as too long.
           messages = compactMessages(messages);
-          const response = await this.llm.completeWithTools(messages, toolSpecs);
+          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs);
+          messages = recovered.messages;
+          const response = recovered.response;
 
           // Process any tool calls
           if (response.toolCalls.length > 0) {
@@ -692,20 +724,27 @@ export class AdaptiveRunner {
               toolCalls: response.toolCalls,
             });
 
-            // Execute this turn's tool calls CONCURRENTLY — they are independent
-            // by design, so parallel delegations / lookups actually run in
-            // parallel. Results are then processed in the ORIGINAL order so
-            // native tool_use/tool_result pairing stays valid.
-            const executed = await Promise.all(
-              response.toolCalls.map(async (toolCall) => ({
-                toolCall,
-                toolResult: await this.toolRegistry.execute(
-                  toolCall.name,
-                  toolCall.arguments,
-                  toolContext,
-                ),
-              })),
+            // Execute this turn's tool calls with capability-aware scheduling:
+            // parallel-safe (read-only) calls fan out concurrently, while a
+            // writer/destructive/unknown tool becomes a serial barrier so two
+            // mutations never race. Results are processed in ORIGINAL order so
+            // native tool_use/tool_result pairing stays valid regardless.
+            const batches = planToolBatches(
+              response.toolCalls,
+              (name) => this.toolRegistry.get(name),
             );
+            const executed: Array<{ toolCall: (typeof response.toolCalls)[number]; toolResult: ToolResult }> = [];
+            for (const batch of batches) {
+              const run = (toolCall: (typeof response.toolCalls)[number]) =>
+                this.toolRegistry
+                  .execute(toolCall.name, toolCall.arguments, toolContext)
+                  .then((toolResult) => ({ toolCall, toolResult }));
+              if (batch.parallel) {
+                executed.push(...(await Promise.all(batch.calls.map(run))));
+              } else {
+                executed.push(await run(batch.calls[0]));
+              }
+            }
 
             for (const { toolCall, toolResult } of executed) {
               allToolResults.push(toolResult);
@@ -740,8 +779,9 @@ export class AdaptiveRunner {
               allReasoning.push("Goal completed during tool execution");
               // Let the model generate a final response with goal-complete context
               try {
-                const finalResponse = await this.llm.completeWithTools!(messages, toolSpecs);
-                responseText = finalResponse.content ?? "";
+                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs);
+                messages = finalResponse.messages;
+                responseText = finalResponse.response.content ?? "";
               } catch {
                 responseText = "Task completed successfully.";
               }

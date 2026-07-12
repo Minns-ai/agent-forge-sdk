@@ -7,9 +7,16 @@ export { SimpleAgent } from "./simple-agent.js";
 export type { SimpleAgentConfig, SimpleAgentStep } from "./simple-agent.js";
 export {
   compactMessages,
+  gcMessages,
   estimateTokens,
   type CompactionOptions,
+  type GcOptions,
 } from "./pipeline/context-compaction.js";
+export {
+  isContextLengthError,
+  recoverContext,
+  MAX_CONTEXT_RECOVERY,
+} from "./pipeline/context-recovery.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export type {
@@ -18,6 +25,12 @@ export type {
   ToolParameterSchema,
   ToolResult,
   ToolContext,
+  ToolEffect,
+  ToolValidation,
+  ToolAccess,
+  ToolPolicy,
+  PolicyOutcome,
+  ToolExecuteOptions,
   LLMProvider,
   LLMMessage,
   LLMCompletionOptions,
@@ -35,6 +48,7 @@ export type {
   PipelineSummary,
   GoalProgress,
   PipelineResult,
+  StopReason,
   GoalChecker,
   ReasoningConfig,
   AgentForgeConfig,
@@ -101,6 +115,22 @@ export { wrapLegacyClient, isMemoryIntegration } from "./memory/adapter.js";
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 export { ToolRegistry } from "./tools/tool-registry.js";
+export {
+  buildTool,
+  isParallelSafe,
+  isLoaded,
+  planToolBatches,
+  evaluatePolicy,
+  capResultSize,
+  orderToolsForCache,
+} from "./tools/tool.js";
+export type { ToolBatch } from "./tools/tool.js";
+export {
+  extractBaseCommand,
+  interpretCommandExit,
+  isExpectedNonzeroExit,
+} from "./tools/command-semantics.js";
+export type { CommandOutcome } from "./tools/command-semantics.js";
 export {
   registerMcpServer,
   mcpToolDefinitions,
@@ -264,6 +294,34 @@ export { MinnsCheckpointer } from "./graph/minns-checkpointer.js";
 export type { MinnsClientLike, MinnsCheckpointerConfig } from "./graph/minns-checkpointer.js";
 export { MinnsGraphObserver } from "./graph/minns-observer.js";
 export type { MinnsObserverConfig } from "./graph/minns-observer.js";
+
+// ─── Tasks (lifecycle + terminal guard + type-prefixed ids) ─────────────────
+export {
+  isTerminalTaskStatus,
+  canTransition,
+  generateTaskId,
+  TaskTable,
+} from "./tasks/task.js";
+export type {
+  TaskType,
+  TaskStatus,
+  TaskRecord,
+  CreateTaskOptions,
+} from "./tasks/task.js";
+
+// ─── VCR (record/replay LLM provider) ───────────────────────────────────────
+export { VCRProvider, InMemoryCassette } from "./llm/vcr.js";
+export type { VCRMode, VCRConfig, Cassette, CassetteEntry } from "./llm/vcr.js";
+
+// ─── Coordinator (fan-out/fan-in multi-agent) ───────────────────────────────
+export { Coordinator } from "./coordinator/coordinator.js";
+export type {
+  WorkerEffect,
+  CoordinatorTask,
+  WorkerOutcome,
+  CoordinatorConfig,
+  CoordinatorResult,
+} from "./coordinator/coordinator.js";
 
 // ─── Sub-Agents ─────────────────────────────────────────────────────────────
 export { SubAgentRunner } from "./subagent/sub-agent.js";
