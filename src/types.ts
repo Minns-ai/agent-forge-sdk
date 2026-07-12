@@ -20,17 +20,124 @@ export interface ToolParameterSchema {
   enum?: string[];
 }
 
+/** What a tool does to the world. Drives concurrency and approval defaults:
+ *  `read` is parallel-safe and never auto-gated; `write` is serialized; a
+ *  `destructive` (irreversible) op additionally requires approval by default. */
+export type ToolEffect = "read" | "write" | "destructive";
+
+/** Result of a tool's own semantic input validation. `ok: false` returns a
+ *  friendly, model-facing message instead of running the tool. */
+export interface ToolValidation {
+  ok: boolean;
+  /** Explanation surfaced to the model when `ok` is false. */
+  error?: string;
+}
+
+/** Outcome of a tool's per-call access check. */
+export type ToolAccess =
+  | { allow: true }
+  | { allow: false; reason: string }
+  /** Defer to the human-approval path before executing. */
+  | { ask: true; reason: string };
+
 export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, ToolParameterSchema>;
   execute: (params: Record<string, any>, context: ToolContext) => Promise<ToolResult>;
+
+  // ─── Capability metadata (all optional; `buildTool()` fills safe defaults) ──
+  /** Effect on the world. Absent ⇒ treated as "write" (conservative). */
+  effect?: ToolEffect;
+  /** Safe to run concurrently with other parallel-safe tools in the same turn.
+   *  Absent ⇒ derived from `effect` (read ⇒ true, write/destructive ⇒ false). */
+  parallelSafe?: boolean;
+  /** Whether an in-flight call may be cancelled ("cancel") or must run to
+   *  completion once started ("block"). Absent ⇒ "cancel". */
+  interrupt?: "cancel" | "block";
+  /** Progressive disclosure: keep this tool's schema OUT of the model's tool
+   *  list until it is searched for or explicitly loaded. Absent ⇒ false. */
+  defer?: boolean;
+  /** Keep this tool's schema in context even under disclosure pressure.
+   *  Overrides `defer`. */
+  alwaysLoad?: boolean;
+  /** Cheap semantic validation of params before `execute`. Return a friendly
+   *  error rather than throwing; the registry surfaces it as a failed result. */
+  validate?: (
+    params: Record<string, any>,
+    context: ToolContext,
+  ) => ToolValidation | Promise<ToolValidation>;
+  /** Per-call access decision (allow / deny / require-approval). Consulted
+   *  after `validate`, before `execute`. */
+  checkAccess?: (
+    params: Record<string, any>,
+    context: ToolContext,
+  ) => ToolAccess | Promise<ToolAccess>;
+  /** Short human-facing activity line for UIs/telemetry (e.g. "Searching
+   *  memory…"). Pure and synchronous — no side effects. */
+  describe?: (params: Record<string, any>) => string;
+  /** Cap on serialized result size in bytes; larger results are truncated to a
+   *  preview with a note. Absent ⇒ the registry default (off unless set). */
+  maxResultBytes?: number;
+  /** Free-form tags for grouping and disclosure search. */
+  tags?: string[];
+  /** Which host tier runs this tool. Informational — lets the platform route
+   *  first-party tools in-process and untrusted/generated ones to a sandbox. */
+  tier?: "inproc" | "sandbox" | "remote";
 }
 
 export interface ToolResult {
   success: boolean;
   result?: any;
   error?: string;
+  /** Synthetic messages to inject into the transcript after this call — e.g. a
+   *  sub-agent summary or a follow-up instruction the tool wants the model to
+   *  see. */
+  contextMessages?: Array<{ role: "user" | "assistant" | "tool"; content: string }>;
+  /** One-line, human-facing outcome for UIs/telemetry (distinct from the raw
+   *  `result` payload the model consumes). */
+  display?: string;
+  /** Set by the registry when the serialized result exceeded its size cap. */
+  truncated?: boolean;
+  /** Set when the call was refused by policy or a tool access check, as opposed
+   *  to failing during execution. */
+  denied?: boolean;
+}
+
+/** Coarse, name-based permission policy evaluated in front of a tool's own
+ *  `checkAccess`. Precedence: `deny` > `allow` > `ask` > destructive auto-ask. */
+export interface ToolPolicy {
+  /** Tool names (or "*") allowed without approval. Also suppresses the
+   *  destructive auto-ask for those names. */
+  allow?: string[];
+  /** Tool names (or "*") always refused. */
+  deny?: string[];
+  /** Tool names (or "*") that always require approval. */
+  ask?: string[];
+  /** When true (default), any tool with `effect: "destructive"` requires
+   *  approval unless explicitly allowed. */
+  askOnDestructive?: boolean;
+}
+
+export type PolicyOutcome =
+  | { decision: "allow" }
+  | { decision: "deny"; reason: string }
+  | { decision: "ask"; reason: string };
+
+/** Optional controls passed to `ToolRegistry.execute`. Back-compatible: absent
+ *  ⇒ validation + size-capping still run, but no policy gating and no
+ *  approval prompt. */
+export interface ToolExecuteOptions {
+  /** Coarse name-based policy applied before the tool's own `checkAccess`. */
+  policy?: ToolPolicy;
+  /** Invoked when policy or `checkAccess` requires approval. Resolve `true` to
+   *  proceed, `false` to refuse. Absent ⇒ approval-required is fail-closed
+   *  (the call is denied). */
+  onApprovalRequired?: (
+    tool: ToolDefinition,
+    params: Record<string, any>,
+    reason: string,
+  ) => boolean | Promise<boolean>;
 }
 
 export interface ToolContext {

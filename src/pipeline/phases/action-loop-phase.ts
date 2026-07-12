@@ -13,6 +13,7 @@ import type {
 import type { NextFn } from "../../middleware/types.js";
 import { MiddlewareStack } from "../../middleware/stack.js";
 import { ToolRegistry } from "../../tools/tool-registry.js";
+import { planToolBatches } from "../../tools/tool.js";
 import { buildNextActionPrompt } from "../../directive/templates.js";
 import { safeJsonParse } from "../../utils/json.js";
 import { extractFactsFromClaims } from "../../memory/fact-extractor.js";
@@ -180,40 +181,71 @@ async function runNativeToolLoop(params: {
         toolCalls: response.toolCalls,
       });
 
-      for (const tc of response.toolCalls) {
+      // Execute a single call without touching shared state — used both
+      // serially and in parallel batches. Blocked tools resolve to a synthetic
+      // failed result so ordering/bookkeeping stays uniform.
+      const runCall = async (
+        tc: (typeof response.toolCalls)[number],
+      ): Promise<{ tc: typeof tc; blocked: boolean; result: ToolResult }> => {
         if (!toolRegistry.isAllowed(tc.name, allowedTools)) {
-          reasoning.push(`Tool ${tc.name} not allowed, skipping.`);
-          actionSummaries.push(`${tc.name} (blocked)`);
-          // Still need to send a tool result back
+          return {
+            tc,
+            blocked: true,
+            result: { success: false, error: `Tool ${tc.name} is not available` },
+          };
+        }
+        const result = await toolRegistry.execute(tc.name, tc.arguments, toolContext);
+        return { tc, blocked: false, result };
+      };
+
+      // Group the calls: consecutive parallel-safe (read-only) tools fan out via
+      // Promise.all; writers/destructive/unknown tools each form a serial
+      // barrier. Bookkeeping is always applied in original call order so the
+      // transcript and session mutations stay deterministic regardless of
+      // execution concurrency.
+      const batches = planToolBatches(response.toolCalls, (name) => toolRegistry.get(name));
+      for (const batch of batches) {
+        const outcomes = batch.parallel
+          ? await Promise.all(batch.calls.map(runCall))
+          : [await runCall(batch.calls[0])];
+
+        for (const { tc, blocked, result } of outcomes) {
+          if (blocked) {
+            reasoning.push(`Tool ${tc.name} not allowed, skipping.`);
+            actionSummaries.push(`${tc.name} (blocked)`);
+            messages.push({
+              role: "tool",
+              content: JSON.stringify({ error: `Tool ${tc.name} is not available` }),
+              toolCallId: tc.id,
+            });
+            continue;
+          }
+
+          toolResults.push(result);
+          reasoning.push(
+            `${tc.name}: ${result.success ? "success" : result.error ?? "failed"}`,
+          );
+          actionSummaries.push(tc.name);
+
+          // Update session state from tool results
+          updateSessionFromToolResult(tc.name, tc.arguments, result, sessionState, claims, intent);
+          if (tc.name === "search_memories" && result.success && result.result) {
+            claims = [...claims, ...(result.result.claims ?? [])];
+          }
+
+          // Any synthetic messages the tool asked to inject (e.g. sub-agent
+          // summaries) precede its tool-result message.
+          for (const m of result.contextMessages ?? []) {
+            messages.push({ role: m.role, content: m.content });
+          }
+
+          // Send tool result back to LLM
           messages.push({
             role: "tool",
-            content: JSON.stringify({ error: `Tool ${tc.name} is not available` }),
+            content: JSON.stringify(result.success ? result.result : { error: result.error }),
             toolCallId: tc.id,
           });
-          continue;
         }
-
-        // Execute the tool
-        const result = await toolRegistry.execute(tc.name, tc.arguments, toolContext);
-        toolResults.push(result);
-
-        reasoning.push(
-          `${tc.name}: ${result.success ? "success" : result.error ?? "failed"}`,
-        );
-        actionSummaries.push(tc.name);
-
-        // Update session state from tool results
-        updateSessionFromToolResult(tc.name, tc.arguments, result, sessionState, claims, intent);
-        if (tc.name === "search_memories" && result.success && result.result) {
-          claims = [...claims, ...(result.result.claims ?? [])];
-        }
-
-        // Send tool result back to LLM
-        messages.push({
-          role: "tool",
-          content: JSON.stringify(result.success ? result.result : { error: result.error }),
-          toolCallId: tc.id,
-        });
       }
     } catch (err: any) {
       reasoning.push(err?.message || "Failed to decide next action.");

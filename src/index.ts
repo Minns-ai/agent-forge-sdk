@@ -18,6 +18,12 @@ export type {
   ToolParameterSchema,
   ToolResult,
   ToolContext,
+  ToolEffect,
+  ToolValidation,
+  ToolAccess,
+  ToolPolicy,
+  PolicyOutcome,
+  ToolExecuteOptions,
   LLMProvider,
   LLMMessage,
   LLMCompletionOptions,
@@ -101,6 +107,15 @@ export { wrapLegacyClient, isMemoryIntegration } from "./memory/adapter.js";
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 export { ToolRegistry } from "./tools/tool-registry.js";
+export {
+  buildTool,
+  isParallelSafe,
+  isLoaded,
+  planToolBatches,
+  evaluatePolicy,
+  capResultSize,
+} from "./tools/tool.js";
+export type { ToolBatch } from "./tools/tool.js";
 export {
   registerMcpServer,
   mcpToolDefinitions,

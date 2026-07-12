@@ -1,15 +1,30 @@
-import type { ToolDefinition, ToolResult, ToolContext } from "../../types.js";
+import type { ToolResult, ToolContext } from "../../types.js";
+import { buildTool } from "../tool.js";
 
 /**
  * Built-in tool: store a fact by sending it as a message to minns for ingestion.
+ * A writer — serialized against other mutating calls, but reversible so it does
+ * not require approval by default.
  */
-export const storeFactTool: ToolDefinition = {
+export const storeFactTool = buildTool({
   name: "store_preference",
   description: "Store a user preference or fact by sending it to the knowledge graph",
+  effect: "write",
+  tier: "inproc",
+  tags: ["memory", "preference", "store"],
   parameters: {
     preference_type: { type: "string", description: "Type of preference (genre, time, snacks, etc.)" },
     preference_value: { type: "string", description: "Value of the preference" },
     rich_context: { type: "string", description: "Rich context for claim extraction" },
+  },
+  describe: (params) => `Storing preference: ${String(params.preference_type ?? "fact")}`,
+  validate: (params) => {
+    const hasValue =
+      (typeof params.preference_value === "string" && params.preference_value.trim().length > 0) ||
+      (typeof params.rich_context === "string" && params.rich_context.trim().length > 0);
+    return hasValue
+      ? { ok: true }
+      : { ok: false, error: "provide `preference_value` or `rich_context` to store" };
   },
   async execute(params: Record<string, any>, context: ToolContext): Promise<ToolResult> {
     try {
@@ -42,4 +57,4 @@ export const storeFactTool: ToolDefinition = {
       };
     }
   },
-};
+});

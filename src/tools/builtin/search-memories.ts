@@ -1,14 +1,24 @@
-import type { ToolDefinition, ToolResult, ToolContext } from "../../types.js";
+import type { ToolResult, ToolContext } from "../../types.js";
+import { buildTool } from "../tool.js";
 
 /**
  * Built-in tool: search claims and query the knowledge graph via minns-sdk.
+ * Read-only and parallel-safe — the runner may fan it out alongside other reads.
  */
-export const searchMemoriesTool: ToolDefinition = {
+export const searchMemoriesTool = buildTool({
   name: "search_memories",
   description: "Search for relevant claims and knowledge from the user's history",
+  effect: "read",
+  tier: "inproc",
+  tags: ["memory", "search", "knowledge"],
   parameters: {
     query: { type: "string", description: "Search query" },
   },
+  describe: (params) => `Searching memory for “${String(params.query ?? "").slice(0, 60)}”`,
+  validate: (params) =>
+    typeof params.query === "string" && params.query.trim().length > 0
+      ? { ok: true }
+      : { ok: false, error: "`query` must be a non-empty string" },
   async execute(params: Record<string, any>, context: ToolContext): Promise<ToolResult> {
     try {
       const { client } = context;
@@ -88,4 +98,4 @@ export const searchMemoriesTool: ToolDefinition = {
       };
     }
   },
-};
+});
