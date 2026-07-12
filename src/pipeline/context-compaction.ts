@@ -72,7 +72,12 @@ export function microCompact(messages: LLMMessage[], options: MicroCompactOption
   const clearable = new Set(toolIdx.slice(0, toolIdx.length - keepRecent));
   let changed = false;
   const out = messages.map((m, i) => {
-    if (clearable.has(i) && typeof m.content === "string" && m.content.length > minLength) {
+    if (
+      clearable.has(i) &&
+      typeof m.content === "string" &&
+      m.content.length > minLength &&
+      m.content !== placeholder // already cleared — skip so a 2nd pass is a true no-op
+    ) {
       changed = true;
       return { ...m, content: placeholder };
     }
