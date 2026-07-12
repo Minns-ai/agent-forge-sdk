@@ -41,6 +41,7 @@ export type {
   PipelineSummary,
   GoalProgress,
   PipelineResult,
+  StopReason,
   GoalChecker,
   ReasoningConfig,
   AgentForgeConfig,
@@ -114,6 +115,7 @@ export {
   planToolBatches,
   evaluatePolicy,
   capResultSize,
+  orderToolsForCache,
 } from "./tools/tool.js";
 export type { ToolBatch } from "./tools/tool.js";
 export {

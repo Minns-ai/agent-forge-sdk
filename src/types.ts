@@ -356,6 +356,15 @@ export interface GoalProgress {
   completed: boolean;
 }
 
+/** Why an agent loop terminated — a typed terminal state rather than a bare
+ *  message, so callers can branch on the outcome. */
+export type StopReason =
+  | "done"
+  | "max_iterations"
+  | "max_tool_calls"
+  | "max_budget"
+  | "error";
+
 export interface PipelineResult {
   success: boolean;
   message: string;
@@ -366,6 +375,12 @@ export interface PipelineResult {
   reasoning: string[];
   pipeline: PipelineSummary;
   errors: string[];
+  /** Typed terminal state of the loop, when the runner reports one. */
+  stopReason?: StopReason;
+  /** Estimated USD cost accrued during the run, when cost accounting is on. */
+  usdCost?: number;
+  /** Calls refused by policy or a tool's access check (audit trail). */
+  permissionDenials?: Array<{ tool: string; reason: string }>;
 }
 
 // ─── Agent Config ────────────────────────────────────────────────────────────

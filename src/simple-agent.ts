@@ -7,9 +7,12 @@ import type {
   ToolPolicy,
   ToolExecuteOptions,
   PipelineResult,
+  StopReason,
 } from "./types.js";
 import { ToolRegistry } from "./tools/tool-registry.js";
 import { safeJsonParse } from "./utils/json.js";
+import { estimateCost } from "./llm/usage.js";
+import { estimateTokens } from "./pipeline/context-compaction.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +43,16 @@ export interface SimpleAgentConfig {
   /** Approval gate invoked when policy or a tool's `checkAccess` requires it.
    *  Absent ⇒ approval-required calls are refused (fail-closed). */
   onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
+  /** Hard cap on total tool executions across the run (distinct from
+   *  maxIterations, which bounds LLM turns). Reached ⇒ stopReason
+   *  "max_tool_calls". */
+  maxToolCalls?: number;
+  /** Estimated-USD ceiling for the run. When set together with `model`, each
+   *  turn's cost is estimated and accumulated; exceeding the ceiling stops the
+   *  loop with stopReason "max_budget". A soft governor for headless runs. */
+  maxBudgetUsd?: number;
+  /** Model id used to price token usage for `maxBudgetUsd` accounting. */
+  model?: string;
 }
 
 // ─── Prompt builders (self-contained) ────────────────────────────────────────
@@ -147,10 +160,15 @@ export class SimpleAgent {
     const reasoning: string[] = [];
     const errors: string[] = [];
     const history: LLMMessage[] = [];
+    const permissionDenials: Array<{ tool: string; reason: string }> = [];
 
     const startTime = Date.now();
     let llmMs = 0;
     let doneMessage = "";
+    let stopReason: StopReason | undefined;
+    let toolCallCount = 0;
+    let usdCost = 0;
+    const trackCost = !!this.config.model;
 
     for (let step = 0; step < maxIterations; step++) {
       const messages = buildConversationMessages(this.systemPrompt, task, history);
@@ -164,9 +182,28 @@ export class SimpleAgent {
         const msg = err?.message || "LLM call failed";
         errors.push(msg);
         reasoning.push(`Step ${step + 1}: LLM error — ${msg}`);
+        stopReason = "error";
         break;
       }
       llmMs += Date.now() - llmStart;
+
+      // ── Budget governor ───────────────────────────────────────────────
+      // Estimate this turn's cost from message + response tokens. Stop before
+      // spending past the ceiling on the NEXT turn (never mid-response).
+      if (trackCost) {
+        usdCost += estimateCost(
+          this.config.model!,
+          estimateTokens(messages),
+          estimateTokens([{ role: "assistant", content: rawResponse }]),
+        );
+        if (this.config.maxBudgetUsd !== undefined && usdCost > this.config.maxBudgetUsd) {
+          reasoning.push(
+            `Step ${step + 1}: budget ceiling reached ($${usdCost.toFixed(4)} > $${this.config.maxBudgetUsd})`,
+          );
+          stopReason = "max_budget";
+          break;
+        }
+      }
 
       // ── Parse response ────────────────────────────────────────────────
       const parsed = safeJsonParse<{
@@ -207,6 +244,7 @@ export class SimpleAgent {
       // ── Done ──────────────────────────────────────────────────────────
       if (parsed.action === "done") {
         doneMessage = parsed.summary || parsed.reasoning || "Task completed.";
+        stopReason = "done";
         break;
       }
 
@@ -236,6 +274,13 @@ export class SimpleAgent {
           history.push({ role: "assistant", content: rawResponse });
           history.push({ role: "user", content: `Error: ${errMsg}. Available tools: ${[...this.disclosed].join(", ")}` });
           continue;
+        }
+
+        // Tool-call governor: stop before exceeding the hard cap.
+        if (this.config.maxToolCalls !== undefined && toolCallCount >= this.config.maxToolCalls) {
+          reasoning.push(`Step ${step + 1}: tool-call cap (${this.config.maxToolCalls}) reached`);
+          stopReason = "max_tool_calls";
+          break;
         }
 
         // Enforce disclosure: a deferred tool must be surfaced via find_tools
@@ -280,6 +325,10 @@ export class SimpleAgent {
           },
         );
         toolResults.push(result);
+        toolCallCount++;
+        if (result.denied) {
+          permissionDenials.push({ tool: toolName, reason: result.error ?? "denied" });
+        }
 
         // Append to conversation history for the LLM to see
         history.push({ role: "assistant", content: rawResponse });
@@ -299,12 +348,13 @@ export class SimpleAgent {
       });
     }
 
-    // If we exhausted iterations without a "done", use the last reasoning
+    // If we exhausted iterations without a terminal reason, it was the turn cap.
     if (!doneMessage) {
       doneMessage = reasoning.length > 0
         ? reasoning[reasoning.length - 1]
         : "Reached max iterations without completing.";
     }
+    if (!stopReason) stopReason = "max_iterations";
 
     const totalMs = Date.now() - startTime;
 
@@ -313,7 +363,9 @@ export class SimpleAgent {
       message: doneMessage,
       intent: null,
       memory: { claims: [] },
-      goalProgress: { completed: true, progress: 1 },
+      // Only a clean "done" counts as goal completion; a governor/iteration
+      // stop is an incomplete run.
+      goalProgress: { completed: stopReason === "done", progress: stopReason === "done" ? 1 : 0 },
       toolResults,
       reasoning,
       pipeline: {
@@ -323,6 +375,9 @@ export class SimpleAgent {
         llm_ms: llmMs,
       },
       errors,
+      stopReason,
+      ...(trackCost ? { usdCost } : {}),
+      ...(permissionDenials.length ? { permissionDenials } : {}),
     };
   }
 }

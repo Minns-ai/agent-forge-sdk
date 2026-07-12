@@ -110,6 +110,32 @@ export function planToolBatches<T extends { name: string }>(
   return batches;
 }
 
+// ─── Prompt-cache-stable ordering ────────────────────────────────────────────
+
+/**
+ * Order a mixed tool list so the model's tool schema forms a stable, cacheable
+ * prefix. First-party in-process tools (`tier: "inproc"` or unset) are sorted
+ * by name into a contiguous prefix; sandboxed/remote tools (MCP, generated)
+ * follow, also sorted. Because the prefix doesn't move when a user's remote
+ * tools change between turns, the prompt cache over the tool definitions stays
+ * warm — remote churn only invalidates the suffix.
+ *
+ * De-duplicates by name (first occurrence wins), mirroring "built-ins take
+ * precedence" so a remote tool can't shadow a first-party one.
+ */
+export function orderToolsForCache(tools: ToolDefinition[]): ToolDefinition[] {
+  const seen = new Set<string>();
+  const builtin: ToolDefinition[] = [];
+  const remote: ToolDefinition[] = [];
+  for (const t of tools) {
+    if (seen.has(t.name)) continue;
+    seen.add(t.name);
+    (t.tier === "remote" || t.tier === "sandbox" ? remote : builtin).push(t);
+  }
+  const byName = (a: ToolDefinition, b: ToolDefinition) => a.name.localeCompare(b.name);
+  return [...builtin.sort(byName), ...remote.sort(byName)];
+}
+
 // ─── Permission policy ───────────────────────────────────────────────────────
 
 /**
