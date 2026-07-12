@@ -289,6 +289,34 @@ export type { MinnsClientLike, MinnsCheckpointerConfig } from "./graph/minns-che
 export { MinnsGraphObserver } from "./graph/minns-observer.js";
 export type { MinnsObserverConfig } from "./graph/minns-observer.js";
 
+// ─── Tasks (lifecycle + terminal guard + type-prefixed ids) ─────────────────
+export {
+  isTerminalTaskStatus,
+  canTransition,
+  generateTaskId,
+  TaskTable,
+} from "./tasks/task.js";
+export type {
+  TaskType,
+  TaskStatus,
+  TaskRecord,
+  CreateTaskOptions,
+} from "./tasks/task.js";
+
+// ─── VCR (record/replay LLM provider) ───────────────────────────────────────
+export { VCRProvider, InMemoryCassette } from "./llm/vcr.js";
+export type { VCRMode, VCRConfig, Cassette, CassetteEntry } from "./llm/vcr.js";
+
+// ─── Coordinator (fan-out/fan-in multi-agent) ───────────────────────────────
+export { Coordinator } from "./coordinator/coordinator.js";
+export type {
+  WorkerEffect,
+  CoordinatorTask,
+  WorkerOutcome,
+  CoordinatorConfig,
+  CoordinatorResult,
+} from "./coordinator/coordinator.js";
+
 // ─── Sub-Agents ─────────────────────────────────────────────────────────────
 export { SubAgentRunner } from "./subagent/sub-agent.js";
 export type {

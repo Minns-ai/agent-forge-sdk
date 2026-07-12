@@ -21,7 +21,14 @@ src/
     provider.ts         — LLMProvider interface
     openai-provider.ts  — OpenAI-compatible provider (fetch-based)
     anthropic-provider.ts — Anthropic native provider (lazy-loads @anthropic-ai/sdk)
+    vcr.ts              — VCRProvider: record/replay wrapper for hermetic tests + eval oracle (InMemoryCassette, JSON persistence)
     types.ts            — LLM-specific types
+
+  tasks/
+    task.ts             — Task lifecycle: TaskStatus/TaskType, isTerminalTaskStatus guard, canTransition, generateTaskId (type-prefixed crypto ids), TaskTable (guarded mutations)
+
+  coordinator/
+    coordinator.ts      — Coordinator: fan-out/fan-in multi-agent (read-concurrent/write-serial, push-not-poll, self-contained workers, continue-vs-spawn, synthesize)
 
   memory/
     memory-manager.ts   — MemoryManager: searchClaims + query in parallel
