@@ -132,6 +132,31 @@ export {
 } from "./tools/command-semantics.js";
 export type { CommandOutcome } from "./tools/command-semantics.js";
 export {
+  checkShellCommand,
+  classifyCommandEffect,
+} from "./tools/shell-safety.js";
+export type {
+  ShellVerdict,
+  ShellEffect,
+  ShellSafetyOptions,
+  ShellCheck,
+} from "./tools/shell-safety.js";
+export {
+  computeEdit,
+  makeLineDiff,
+  contentVersion,
+  ReadRegistry,
+  guardedEdit,
+} from "./tools/safe-edit.js";
+export type {
+  EditRequest,
+  // Aliased: `EditResult` is already exported by the filesystem backend protocol.
+  EditResult as SafeEditResult,
+  EditErrorCode,
+  FreshCheck,
+  GuardedEditResult,
+} from "./tools/safe-edit.js";
+export {
   registerMcpServer,
   mcpToolDefinitions,
   connectMcp,
