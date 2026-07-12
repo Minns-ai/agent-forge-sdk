@@ -75,6 +75,14 @@ function hashKey(parts: unknown): string {
   return createHash("sha256").update(canonicalizeJson(parts)).digest("hex").slice(0, 32);
 }
 
+/** Deep-copy a recorded value so the cassette's stored copy is never aliased to
+ *  a caller-held reference (a caller mutating a returned tool response must not
+ *  corrupt a later byte-identical replay). Strings pass through untouched. */
+function cloneResponse<T>(value: T): T {
+  if (typeof value === "string") return value;
+  return structuredClone(value);
+}
+
 export interface VCRConfig {
   cassette?: Cassette;
   mode?: VCRMode;
@@ -120,14 +128,16 @@ export class VCRProvider implements LLMProvider {
   ): Promise<LLMToolResponse> {
     const key = hashKey({ kind: "completeWithTools", messages, tools, options: options ?? null });
     const hit = this.cassette.get(key);
-    if (hit && this.mode !== "record") return hit.response as LLMToolResponse;
+    // Clone on replay so a caller mutating the result can't corrupt the tape.
+    if (hit && this.mode !== "record") return cloneResponse(hit.response as LLMToolResponse);
     if (this.mode === "replay") return this.miss("completeWithTools");
     if (!this.inner) throw new Error("VCR: no inner provider to record from");
     if (!this.inner.completeWithTools) {
       throw new Error("VCR: inner provider does not support completeWithTools");
     }
     const response = await this.inner.completeWithTools(messages, tools, options);
-    this.cassette.set(key, { kind: "completeWithTools", response });
+    // Store an isolated copy so later mutation of `response` can't alter the tape.
+    this.cassette.set(key, { kind: "completeWithTools", response: cloneResponse(response) });
     return response;
   }
 
@@ -144,7 +154,10 @@ export class VCRProvider implements LLMProvider {
     if (this.mode === "replay") this.miss("stream");
     if (!this.inner) throw new Error("VCR: no inner provider to record from");
     // Consume the inner stream fully, accumulating text to record, while
-    // forwarding chunks live so recording is transparent to the caller.
+    // forwarding chunks live so recording is transparent to the caller. Note:
+    // if the consumer abandons the generator early, the loop never completes and
+    // nothing is recorded — by design (we won't record a response we didn't
+    // fully receive); that request stays a replay miss until fully consumed once.
     let full = "";
     for await (const chunk of this.inner.stream(messages, options)) {
       full += chunk.delta;

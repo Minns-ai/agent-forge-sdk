@@ -63,19 +63,30 @@ export interface CoordinatorConfig<R = unknown> {
 
 export interface CoordinatorResult<R = unknown> {
   outcomes: Array<WorkerOutcome<R>>;
-  /** Present only when a `synthesize` step was configured. */
+  /** Present only when a `synthesize` step was configured and succeeded. */
   synthesis?: string;
+  /** Set when a configured `synthesize` step threw — kept here instead of
+   *  propagating, so `coordinate()` never throws. */
+  synthesisError?: string;
 }
 
-/** Group tasks into execution batches: consecutive read tasks collapse into one
- *  concurrent batch; a write task is its own serial barrier. Order preserved. */
-function batchTasks<T extends { effect?: WorkerEffect }>(tasks: T[]): Array<{ parallel: boolean; items: T[] }> {
-  const batches: Array<{ parallel: boolean; items: T[] }> = [];
-  for (const task of tasks) {
-    const isRead = (task.effect ?? "read") === "read";
+/** An input task paired with its stable position in the submitted list. */
+interface IndexedTask {
+  task: CoordinatorTask;
+  index: number;
+}
+
+/** Group indexed tasks into execution batches: consecutive read tasks collapse
+ *  into one concurrent batch; a write task is its own serial barrier. Order
+ *  preserved. Operates on {task,index} pairs so a duplicate task OBJECT in the
+ *  input can't collapse two positions onto one index. */
+function batchTasks(items: IndexedTask[]): Array<{ parallel: boolean; items: IndexedTask[] }> {
+  const batches: Array<{ parallel: boolean; items: IndexedTask[] }> = [];
+  for (const item of items) {
+    const isRead = (item.task.effect ?? "read") === "read";
     const last = batches[batches.length - 1];
-    if (isRead && last && last.parallel) last.items.push(task);
-    else batches.push({ parallel: isRead, items: [task] });
+    if (isRead && last && last.parallel) last.items.push(item);
+    else batches.push({ parallel: isRead, items: [item] });
   }
   return batches;
 }
@@ -94,11 +105,11 @@ export class Coordinator<R = unknown> {
    */
   async coordinate(tasks: CoordinatorTask[]): Promise<CoordinatorResult<R>> {
     const outcomes: Array<WorkerOutcome<R>> = new Array(tasks.length);
-    const indexOf = new Map<CoordinatorTask, number>();
-    tasks.forEach((t, i) => indexOf.set(t, i));
+    // Position is the source of truth (not object identity) so a task object
+    // that appears twice in the input maps to two distinct outcome slots.
+    const indexed: IndexedTask[] = tasks.map((task, index) => ({ task, index }));
 
-    const runOne = async (task: CoordinatorTask): Promise<void> => {
-      const index = indexOf.get(task)!;
+    const runOne = async ({ task, index }: IndexedTask): Promise<void> => {
       const start = this.now();
       let outcome: WorkerOutcome<R>;
       try {
@@ -122,13 +133,19 @@ export class Coordinator<R = unknown> {
       }
     };
 
-    for (const batch of batchTasks(tasks)) {
+    for (const batch of batchTasks(indexed)) {
       if (batch.parallel) await Promise.all(batch.items.map(runOne));
       else await runOne(batch.items[0]);
     }
 
     if (!this.config.synthesize) return { outcomes };
-    const synthesis = await this.config.synthesize(outcomes);
-    return { outcomes, synthesis };
+    // Synthesis is the one caller-provided terminal step; capture its error
+    // rather than letting it break the "never throws" guarantee.
+    try {
+      const synthesis = await this.config.synthesize(outcomes);
+      return { outcomes, synthesis };
+    } catch (err) {
+      return { outcomes, synthesisError: err instanceof Error ? err.message : String(err) };
+    }
   }
 }

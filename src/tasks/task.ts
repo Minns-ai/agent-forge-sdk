@@ -99,6 +99,12 @@ export interface CreateTaskOptions<M = unknown> {
  * In-memory table of tasks that enforces the terminal-state guard on every
  * mutation. `transition`/`update` are no-ops (returning false) once a task is
  * terminal, so a stale callback can never revive or overwrite a finished task.
+ *
+ * Accessors return SHALLOW COPIES of the stored records, not live references —
+ * so a caller writing `record.status = "running"` mutates only their copy and
+ * can't reach around the guard to resurrect a terminal task. (Nested `meta` is
+ * shared by the shallow copy; the guarded fields are primitives, copied by
+ * value.)
  */
 export class TaskTable {
   private tasks = new Map<string, TaskRecord>();
@@ -118,22 +124,25 @@ export class TaskTable {
       ...(options.meta !== undefined ? { meta: options.meta } : {}),
     };
     this.tasks.set(record.id, record as TaskRecord);
-    return record;
+    return { ...record };
   }
 
   get<M = unknown>(id: string): TaskRecord<M> | undefined {
-    return this.tasks.get(id) as TaskRecord<M> | undefined;
+    const record = this.tasks.get(id) as TaskRecord<M> | undefined;
+    return record ? { ...record } : undefined;
   }
 
   list(filter?: { status?: TaskStatus; type?: TaskType; parentId?: string }): TaskRecord[] {
     const all = [...this.tasks.values()];
-    if (!filter) return all;
-    return all.filter(
-      (t) =>
-        (filter.status === undefined || t.status === filter.status) &&
-        (filter.type === undefined || t.type === filter.type) &&
-        (filter.parentId === undefined || t.parentId === filter.parentId),
-    );
+    const matched = !filter
+      ? all
+      : all.filter(
+          (t) =>
+            (filter.status === undefined || t.status === filter.status) &&
+            (filter.type === undefined || t.type === filter.type) &&
+            (filter.parentId === undefined || t.parentId === filter.parentId),
+        );
+    return matched.map((t) => ({ ...t }));
   }
 
   /**
