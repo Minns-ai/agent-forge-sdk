@@ -77,6 +77,14 @@ export function interpretCommandExit(command: string, exitCode: number): Command
     return { ok: true, meaning: "succeeded", baseCommand, exitCode };
   }
 
+  // For `&&`/`||` chains the exit code may come from a SHORT-CIRCUITED earlier
+  // command, not the last one — so we can't safely apply the last command's
+  // lenient "expected non-zero" semantics (that would score a failed step as
+  // success). Treat a non-zero exit from a short-circuit chain as a failure.
+  if (/&&|\|\|/.test(command)) {
+    return { ok: false, meaning: `failed (exit ${exitCode}); ambiguous in && / || chain`, baseCommand, exitCode };
+  }
+
   if (SEARCH_FAMILY.has(baseCommand)) {
     return exitCode === 1
       ? { ok: true, meaning: "no matches found", baseCommand, exitCode }

@@ -45,24 +45,48 @@ const worse = (a: ShellVerdict, b: ShellVerdict): ShellVerdict =>
   SEVERITY[a] >= SEVERITY[b] ? a : b;
 
 // Base commands that only read state — safe to fan out, never need approval.
+// Deliberately EXCLUDES interpreters (node/python/ruby/…) and shells: they run
+// arbitrary code and must never be classified read. `sed`/`awk` stay here but
+// their write-forms (`sed -i`, `awk 'system(…)'`) are detected below.
 const READ_ONLY = new Set([
-  "ls", "cat", "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "head", "tail",
+  "ls", "cat", "grep", "egrep", "fgrep", "rg", "ag", "ack", "head", "tail",
   "wc", "echo", "printf", "pwd", "which", "type", "stat", "file", "du", "df", "tree",
   "ps", "env", "printenv", "date", "whoami", "id", "uname", "hostname", "basename",
   "dirname", "realpath", "readlink", "sort", "uniq", "cut", "awk", "sed", "diff",
-  "cmp", "test", "true", "false", "sleep", "man", "help", "node", "python", "python3",
+  "cmp", "test", "true", "false", "sleep", "man", "help",
+]);
+
+// Interpreters / shells — they execute arbitrary code, so never read-only.
+const INTERPRETERS = new Set([
+  "node", "deno", "bun", "python", "python2", "python3", "ruby", "perl", "php",
+  "bash", "sh", "zsh", "ksh", "dash", "source",
+]);
+
+// Command prefixes that wrap the real command without changing its semantics.
+const WRAPPERS = new Set([
+  "sudo", "time", "command", "nohup", "env", "nice", "ionice", "stdbuf", "builtin",
+  "exec", "then", "do", "xargs",
 ]);
 
 // Read-only subcommands for common multiplexer commands (base → subcommand set).
+// Only subcommands that read state REGARDLESS of arguments — `git config KEY
+// VALUE`, `git tag NAME`, `git branch NAME`, `npm config set` all WRITE, so
+// those subcommands are intentionally absent (they fall through to "write").
 const READ_ONLY_SUBCOMMANDS: Record<string, Set<string>> = {
-  git: new Set(["status", "log", "diff", "show", "branch", "remote", "config", "blame", "describe", "rev-parse", "ls-files", "ls-tree", "cat-file", "shortlog", "tag"]),
-  npm: new Set(["ls", "list", "view", "outdated", "audit", "ping", "whoami", "root", "prefix", "config"]),
+  git: new Set(["status", "log", "diff", "show", "blame", "describe", "rev-parse", "ls-files", "ls-tree", "cat-file", "shortlog"]),
+  npm: new Set(["ls", "list", "view", "outdated", "audit", "ping", "whoami", "root", "prefix"]),
   pnpm: new Set(["ls", "list", "why", "outdated", "audit"]),
   yarn: new Set(["list", "info", "why", "outdated"]),
   docker: new Set(["ps", "images", "logs", "inspect", "version", "info", "top"]),
   kubectl: new Set(["get", "describe", "logs", "version", "explain", "top", "api-resources"]),
   cargo: new Set(["check", "tree", "metadata", "search"]),
 };
+
+// Output redirection to a real file (writes) — the `(?!&|/dev/null)` lookahead
+// excludes `>&N` fd-dup and `>/dev/null`, so `2>errfile` and `>out` count as
+// writes while `2>&1` and `>/dev/null` do not. A read command with a file
+// redirection still mutates the fs.
+const WRITE_REDIRECT = />>?\s*(?!&|\/dev\/null\b)[^\s&|;<>]+/;
 
 // Injection / obfuscation red flags — patterns that break a naive read of the
 // command (command substitution smuggles arbitrary execution; escaped operators
@@ -84,35 +108,81 @@ const SENSITIVE = [
   { re: /\/proc\/[^/\s]+\/environ/, why: "reads /proc/<pid>/environ (environment exfiltration)" },
 ];
 
-// Known destructive shapes. Conservative — aims for high-confidence matches.
+// Known destructive shapes. Matched per segment. `rm` with ANY recursive flag
+// is destructive regardless of path/force split (`rm -r -f x` and `rm -rf x`
+// both match).
 const DESTRUCTIVE = [
-  { re: /\brm\s+(?:-[a-z]*\s+)*-?[a-z]*[rf][a-z]*\b[^|;&]*\s(?:\/|~|\/\*|\$HOME)\s*$/i, why: "recursive/forced rm of a root-ish path" },
-  { re: /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r/i, why: "rm -rf" },
+  { re: /\brm\b(?=(?:[^|;&\n]*\s)?-\S*[rR])/i, why: "recursive rm (rm -r/-R)" },
+  { re: /\bfind\s+(?:\/|~|\$HOME)\S*\s[^|;&]*-delete\b/i, why: "find -delete on a root path" },
+  { re: /\bfind\b[^|;&]*-exec(?:dir)?\s+rm\b/i, why: "find -exec rm" },
   { re: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, why: "fork bomb" },
   { re: /\bmkfs\b/i, why: "filesystem format (mkfs)" },
   { re: /\bdd\b[^|;&]*\bof=\/dev\//i, why: "dd writing to a device" },
   { re: />\s*\/dev\/(?:sd|nvme|hd|vd)/i, why: "redirect to a block device" },
   { re: /\bshred\b/i, why: "shred (secure delete)" },
-  { re: /\bchmod\s+-[a-z]*R[a-z]*\s+0*777\s+\//i, why: "recursive chmod 777 on root" },
-  { re: /\bchown\s+-[a-z]*R[a-z]*\b[^|;&]*\s\/\s*$/i, why: "recursive chown of root" },
+  { re: /\bchmod\s+-\S*R\S*\s+0*777\b/i, why: "recursive chmod 777" },
+  { re: /\bchown\s+-\S*R\S*\b[^|;&]*\s\/(?:\s|$)/i, why: "recursive chown of root" },
 ];
 
-/**
- * Classify a shell command's effect. `destructive` when it matches a known
- * dangerous shape; `read` when its base command (or, for git/npm/docker/…, its
- * subcommand) only reads state; otherwise `write` (conservative default).
- */
-export function classifyCommandEffect(command: string): ShellEffect {
-  if (DESTRUCTIVE.some((d) => d.re.test(command))) return "destructive";
-  const base = extractBaseCommand(command);
+/** Split a command line into its pipeline/list segments (each stage of a pipe,
+ *  each `;`/`&&`/`||`/newline-separated command). */
+function splitSegments(command: string): string[] {
+  return command.split(/\|\||&&|\||;|\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+/** Clean tokens of ONE segment: strip leading `VAR=val` assignments and no-op
+ *  wrappers, returning the real command words. */
+function cleanTokens(segment: string): string[] {
+  const seg = segment.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/, "");
+  const words = seg.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < words.length && WRAPPERS.has(words[i])) i++;
+  return words.slice(i);
+}
+
+const stripPath = (w: string): string => (w.includes("/") ? w.slice(w.lastIndexOf("/") + 1) : w);
+
+/** Effect of a SINGLE segment. Fails safe: anything not provably read-only is
+ *  write, and write-forcing flags on otherwise-read commands are detected. */
+function segmentEffect(segment: string): ShellEffect {
+  if (DESTRUCTIVE.some((d) => d.re.test(segment))) return "destructive";
+  // A file redirection makes even a read command a writer.
+  if (WRITE_REDIRECT.test(segment)) return "write";
+
+  const tokens = cleanTokens(segment);
+  const base = stripPath(tokens[0] ?? "");
+
+  if (INTERPRETERS.has(base)) return "write";
+  if (base === "find" && /\s-(?:delete|exec|execdir|fprint|fprintf|fls)\b/.test(segment)) return "write";
+  if (base === "sed" && /(?:^|\s)-i\b|--in-place/.test(segment)) return "write";
+  if (base === "awk" && /system\s*\(/.test(segment)) return "write";
+
   const subs = READ_ONLY_SUBCOMMANDS[base];
   if (subs) {
-    // First non-flag token after the base command is the subcommand.
-    const after = command.slice(command.indexOf(base) + base.length).trim().split(/\s+/);
-    const sub = after.find((w) => w && !w.startsWith("-"));
+    const sub = tokens.slice(1).find((w) => w && !w.startsWith("-"));
     return sub && subs.has(sub) ? "read" : "write";
   }
   return READ_ONLY.has(base) ? "read" : "write";
+}
+
+/**
+ * Classify a shell command's effect as the WORST across ALL of its segments —
+ * so a mutating command hidden in an earlier `&&`/`|`/`;` segment (or expressed
+ * via a write-forcing flag like `find -delete`, `sed -i`, or a `>` redirection)
+ * is never misclassified as `read`. `read` is returned ONLY when every segment
+ * is provably read-only; anything uncertain is `write`; known dangerous shapes
+ * are `destructive`.
+ */
+export function classifyCommandEffect(command: string): ShellEffect {
+  let effect: ShellEffect = "read";
+  const segs = splitSegments(command);
+  if (segs.length === 0) return "read";
+  for (const seg of segs) {
+    const e = segmentEffect(seg);
+    if (e === "destructive") return "destructive";
+    if (e === "write") effect = "write";
+  }
+  return effect;
 }
 
 /**
