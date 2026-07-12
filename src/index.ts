@@ -7,9 +7,16 @@ export { SimpleAgent } from "./simple-agent.js";
 export type { SimpleAgentConfig, SimpleAgentStep } from "./simple-agent.js";
 export {
   compactMessages,
+  gcMessages,
   estimateTokens,
   type CompactionOptions,
+  type GcOptions,
 } from "./pipeline/context-compaction.js";
+export {
+  isContextLengthError,
+  recoverContext,
+  MAX_CONTEXT_RECOVERY,
+} from "./pipeline/context-recovery.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export type {
