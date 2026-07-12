@@ -32,6 +32,55 @@ export function estimateTokens(messages: LLMMessage[]): number {
   return Math.round(messages.reduce((n, m) => n + contentLength(m), 0) / CHARS_PER_TOKEN);
 }
 
+export interface MicroCompactOptions {
+  /** Most-recent tool results kept verbatim. Default 4. */
+  keepRecent?: number;
+  /** Only clear results whose content is longer than this (chars). A small
+   *  result is cheap to keep and often load-bearing. Default 200. */
+  minLength?: number;
+  /** Placeholder that replaces a cleared tool result. */
+  placeholder?: string;
+}
+
+/**
+ * Microcompaction — the lightweight, high-frequency context lever.
+ *
+ * Clears the CONTENT of OLD tool-result messages (the bulk of tokens in a
+ * tool-using loop) to a short placeholder, keeping the most recent `keepRecent`
+ * results verbatim and leaving every assistant/reasoning message untouched.
+ * Distinct from its siblings:
+ *  - `compactMessages` truncates to a PREVIEW and is budget-triggered;
+ *  - `gcMessages` DROPS whole old turns;
+ *  - `microCompact` fully clears old tool OUTPUTS but never drops a message, so
+ *    native tool_use/tool_result pairing always stays valid — cheap enough to
+ *    run every turn or on an idle gap.
+ *
+ * Idempotent: the placeholder is shorter than `minLength`, so a second pass
+ * finds nothing new to clear and returns the same array reference.
+ */
+export function microCompact(messages: LLMMessage[], options: MicroCompactOptions = {}): LLMMessage[] {
+  const keepRecent = Math.max(0, options.keepRecent ?? 4);
+  const minLength = options.minLength ?? 200;
+  const placeholder = options.placeholder ?? "[older tool result cleared to save context]";
+
+  const toolIdx: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "tool") toolIdx.push(i);
+  }
+  if (toolIdx.length <= keepRecent) return messages;
+
+  const clearable = new Set(toolIdx.slice(0, toolIdx.length - keepRecent));
+  let changed = false;
+  const out = messages.map((m, i) => {
+    if (clearable.has(i) && typeof m.content === "string" && m.content.length > minLength) {
+      changed = true;
+      return { ...m, content: placeholder };
+    }
+    return m;
+  });
+  return changed ? out : messages;
+}
+
 export interface GcOptions {
   /** Token ceiling above which whole turns are dropped. Default 100k. */
   maxTokens?: number;
