@@ -4,6 +4,8 @@ import type {
   LLMMessage,
   ToolDefinition,
   ToolResult,
+  ToolPolicy,
+  ToolExecuteOptions,
   PipelineResult,
 } from "./types.js";
 import { ToolRegistry } from "./tools/tool-registry.js";
@@ -31,6 +33,13 @@ export interface SimpleAgentConfig {
    *  agent's live reasoning to a UI. Errors thrown here are swallowed; the
    *  hook can never break the loop. */
   onStep?: (step: SimpleAgentStep) => void;
+  /** Permission policy applied to every tool call (allow/deny/ask +
+   *  destructive auto-ask). Denied or unapproved calls come back as failed
+   *  tool results the model can react to. */
+  policy?: ToolPolicy;
+  /** Approval gate invoked when policy or a tool's `checkAccess` requires it.
+   *  Absent ⇒ approval-required calls are refused (fail-closed). */
+  onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
 }
 
 // ─── Prompt builders (self-contained) ────────────────────────────────────────
@@ -49,13 +58,23 @@ function buildToolDescriptions(tools: ToolDefinition[]): string {
 function buildSystemPrompt(
   directive: SimpleAgentConfig["directive"],
   tools: ToolDefinition[],
+  deferredCount: number,
 ): string {
+  // Progressive disclosure: only the loaded tools are described up front. When
+  // some tools are deferred, tell the model it can pull more in by name/keyword
+  // via find_tools — keeping the prompt lean when the toolbelt is large.
+  const findTools = deferredCount > 0
+    ? `\n\nMORE TOOLS AVAILABLE: ${deferredCount} additional tool(s) are not listed above. To discover them:
+{ "action": "find_tools", "query": "<keywords>", "reasoning": "<why>" }
+The matching tool schemas will be added, after which you can call them with "use_tool".`
+    : "";
+
   return `${directive.identity}
 
 GOAL: ${directive.goalDescription}
 
 AVAILABLE TOOLS:
-${buildToolDescriptions(tools)}
+${buildToolDescriptions(tools)}${findTools}
 
 INSTRUCTIONS:
 You are an agent that completes tasks by calling tools. On each step, respond with JSON only — no other text.
@@ -69,7 +88,7 @@ When the task is complete:
 Rules:
 - Call ONE tool per step.
 - Always include "reasoning" explaining your decision.
-- Use only tools from the AVAILABLE TOOLS list.
+- Use only tools that have been described to you.
 - When you have enough information or the task is finished, use "done".`;
 }
 
@@ -108,11 +127,18 @@ export class SimpleAgent {
   private toolRegistry: ToolRegistry;
   private systemPrompt: string;
 
+  /** Tools whose schemas have been surfaced to the model. Starts with the
+   *  loaded (non-deferred) set; find_tools promotes deferred tools into it. */
+  private disclosed: Set<string>;
+
   constructor(config: SimpleAgentConfig) {
     this.config = config;
     this.toolRegistry = new ToolRegistry();
     this.toolRegistry.registerAll(config.tools);
-    this.systemPrompt = buildSystemPrompt(config.directive, config.tools);
+    const loaded = this.toolRegistry.loadedDefinitions();
+    this.disclosed = new Set(loaded.map((t) => t.name));
+    const deferredCount = this.toolRegistry.deferredDefinitions().length;
+    this.systemPrompt = buildSystemPrompt(config.directive, loaded, deferredCount);
   }
 
   async run(task: string): Promise<PipelineResult> {
@@ -184,6 +210,22 @@ export class SimpleAgent {
         break;
       }
 
+      // ── Progressive disclosure: reveal deferred tools by search ────────
+      if (parsed.action === "find_tools") {
+        const query = (parsed as { query?: string }).query ?? "";
+        const matches = this.toolRegistry.search(query);
+        for (const m of matches) this.disclosed.add(m.name);
+        reasoning.push(`Step ${step + 1}: found ${matches.length} tool(s) for "${query}"`);
+        history.push({ role: "assistant", content: rawResponse });
+        history.push({
+          role: "user",
+          content: matches.length
+            ? `Discovered tools (now callable with use_tool):\n${buildToolDescriptions(matches)}`
+            : `No tools matched "${query}". Try different keywords or use "done".`,
+        });
+        continue;
+      }
+
       // ── Tool call ─────────────────────────────────────────────────────
       if (parsed.action === "use_tool" && parsed.tool_name) {
         const toolName = parsed.tool_name;
@@ -192,7 +234,20 @@ export class SimpleAgent {
           const errMsg = `Tool not found: ${toolName}`;
           reasoning.push(`Step ${step + 1}: ${errMsg}`);
           history.push({ role: "assistant", content: rawResponse });
-          history.push({ role: "user", content: `Error: ${errMsg}. Available tools: ${this.toolRegistry.names().join(", ")}` });
+          history.push({ role: "user", content: `Error: ${errMsg}. Available tools: ${[...this.disclosed].join(", ")}` });
+          continue;
+        }
+
+        // Enforce disclosure: a deferred tool must be surfaced via find_tools
+        // before it can be called, so the model can't call past the lean prompt.
+        if (!this.disclosed.has(toolName)) {
+          const errMsg = `Tool "${toolName}" is not loaded yet`;
+          reasoning.push(`Step ${step + 1}: ${errMsg}`);
+          history.push({ role: "assistant", content: rawResponse });
+          history.push({
+            role: "user",
+            content: `${errMsg}. Use { "action": "find_tools", "query": "${toolName}" } to load it first.`,
+          });
           continue;
         }
 
@@ -217,6 +272,12 @@ export class SimpleAgent {
           toolName,
           parsed.tool_params ?? {},
           toolContext,
+          {
+            ...(this.config.policy ? { policy: this.config.policy } : {}),
+            ...(this.config.onApprovalRequired
+              ? { onApprovalRequired: this.config.onApprovalRequired }
+              : {}),
+          },
         );
         toolResults.push(result);
 

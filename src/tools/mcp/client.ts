@@ -25,6 +25,14 @@ export interface McpToolInfo {
   name: string;
   description?: string;
   inputSchema?: { properties?: Record<string, unknown>; required?: string[] };
+  /** MCP behavioural hints (spec `annotations`), when the server advertises
+   *  them — mapped onto agent-forge capability metadata (effect/parallelSafe). */
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 export interface McpConnection {

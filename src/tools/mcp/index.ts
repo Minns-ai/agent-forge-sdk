@@ -1,4 +1,5 @@
-import type { ToolDefinition, ToolParameterSchema } from "../../types.js";
+import type { ToolDefinition, ToolParameterSchema, ToolEffect } from "../../types.js";
+import { buildTool } from "../tool.js";
 import type { ToolRegistry } from "../tool-registry.js";
 import { connectMcp, type McpConnection, type McpServerConfig, type McpToolInfo } from "./client.js";
 
@@ -35,15 +36,32 @@ function paramsFromSchema(schema: McpToolInfo["inputSchema"]): Record<string, To
 export function mcpToolDefinitions(conn: McpConnection): ToolDefinition[] {
   const allow = conn.config.allowTools;
   const tools = allow && allow.length ? conn.tools.filter((t) => allow.includes(t.name)) : conn.tools;
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description ?? `MCP tool '${t.name}' from ${conn.config.name}`,
-    parameters: paramsFromSchema(t.inputSchema),
-    execute: async (params: Record<string, unknown>) => {
-      const { text, isError } = await conn.callTool(t.name, params);
-      return isError ? { success: false, error: text } : { success: true, result: text };
-    },
-  }));
+  return tools.map((t) => {
+    // Map MCP behavioural hints onto capability metadata. Absent hints stay
+    // conservative: an MCP tool crosses a process/trust boundary (often a
+    // sandboxed, user-generated tool), so default to a non-parallel writer that
+    // needs no approval — a destructive hint escalates to the approval path.
+    const a = t.annotations;
+    const effect: ToolEffect = a?.destructiveHint
+      ? "destructive"
+      : a?.readOnlyHint
+        ? "read"
+        : "write";
+    return buildTool({
+      name: t.name,
+      description: t.description ?? `MCP tool '${t.name}' from ${conn.config.name}`,
+      parameters: paramsFromSchema(t.inputSchema),
+      effect,
+      // Only fan out remote calls the server itself marks read-only.
+      parallelSafe: a?.readOnlyHint === true,
+      tier: "remote",
+      tags: ["mcp", conn.config.name],
+      execute: async (params: Record<string, unknown>) => {
+        const { text, isError } = await conn.callTool(t.name, params);
+        return isError ? { success: false, error: text } : { success: true, result: text };
+      },
+    });
+  });
 }
 
 /**
