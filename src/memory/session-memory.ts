@@ -36,6 +36,11 @@ export class InMemorySessionMemoryStore implements SessionMemoryStore {
 export interface SessionMemoryConfig {
   /** Max tokens for the extraction/merge LLM call. Default 1024. */
   maxTokens?: number;
+  /** Observe store failures. Without this, a transient `load` error is
+   *  indistinguishable from "no memory yet" — the agent silently runs with no
+   *  remembered constraints. This hook lets a caller log/alert/degrade instead
+   *  of treating a backend blip as a clean slate. */
+  onError?: (op: "load" | "save", error: unknown, key: string) => void;
 }
 
 const EXTRACTION_PROMPT =
@@ -79,6 +84,7 @@ export function withSessionMemory(systemPrompt: string, memory: string): string 
 
 export class SessionMemory {
   private maxTokens: number;
+  private onError?: SessionMemoryConfig["onError"];
 
   constructor(
     private store: SessionMemoryStore,
@@ -86,6 +92,7 @@ export class SessionMemory {
     config: SessionMemoryConfig = {},
   ) {
     this.maxTokens = config.maxTokens ?? 1024;
+    this.onError = config.onError;
   }
 
   /**
@@ -96,7 +103,9 @@ export class SessionMemory {
   async recall(key: string): Promise<string> {
     try {
       return (await this.store.load(key)) ?? "";
-    } catch {
+    } catch (err) {
+      // Signal the failure so it isn't silently mistaken for "no memory yet".
+      this.onError?.("load", err, key);
       return "";
     }
   }
@@ -114,7 +123,8 @@ export class SessionMemory {
     let prior: string;
     try {
       prior = (await this.store.load(key)) ?? "";
-    } catch {
+    } catch (err) {
+      this.onError?.("load", err, key);
       return ""; // could not read prior — do NOT save; stored memory is untouched
     }
 
@@ -149,7 +159,8 @@ export class SessionMemory {
 
     try {
       await this.store.save(key, next);
-    } catch {
+    } catch (err) {
+      this.onError?.("save", err, key);
       return prior; // couldn't persist — report the prior state honestly
     }
     return next;

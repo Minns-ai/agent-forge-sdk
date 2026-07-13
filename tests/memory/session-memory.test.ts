@@ -50,6 +50,18 @@ describe("SessionMemory", () => {
     expect(await store.load("k")).toBe("GOOD");
   });
 
+  it("H4: signals a load failure via onError instead of masking it as 'no memory'", async () => {
+    const errs: Array<{ op: string; key: string }> = [];
+    const store: SessionMemoryStore = {
+      async load() { throw new Error("backend down"); },
+      async save() {},
+    };
+    const sm = new SessionMemory(store, fakeLlm(() => "x"), { onError: (op, _e, key) => errs.push({ op, key }) });
+    const r = await sm.recall("k");
+    expect(r).toBe(""); // still degrades gracefully
+    expect(errs).toEqual([{ op: "load", key: "k" }]); // but the failure is OBSERVABLE
+  });
+
   it("hardens the extractor against injection (delimiter + untrusted-data framing)", async () => {
     let sys = "", user = "";
     const sm = new SessionMemory(new InMemorySessionMemoryStore(), fakeLlm((m) => { sys = m[0].content; user = m[1].content; return "clean"; }));
