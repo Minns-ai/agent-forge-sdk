@@ -23,8 +23,11 @@ export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
 
   /** Default result-size cap (bytes) applied to tools that don't set their own.
-   *  0 ⇒ no cap. */
-  constructor(private defaultMaxResultBytes = 0) {}
+   *  Defaults to 256KB so a single runaway tool result can't silently blow out
+   *  the context window (and defeat recovery, which can't shrink a huge result
+   *  once it lands in the recent-keep window). 0 disables the cap. A tool can
+   *  raise or lower it per-tool via `maxResultBytes`. */
+  constructor(private defaultMaxResultBytes = 256 * 1024) {}
 
   /** Register a tool definition */
   register(tool: ToolDefinition): void {

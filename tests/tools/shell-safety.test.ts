@@ -75,8 +75,11 @@ describe("checkShellCommand — verdicts", () => {
     expect(checkShellCommand("cat /proc/1/environ").verdict).toBe("block");
     expect(checkShellCommand("ls\r foo", { substitution: "allow" }).verdict).toBe("block");
   });
-  it("destructive warns by default, blocks on option", () => {
-    expect(checkShellCommand("rm -rf /").verdict).toBe("warn");
-    expect(checkShellCommand("rm -rf /", { destructive: "block" }).verdict).toBe("block");
+  it("destructive BLOCKS by default, warns only on opt-out", () => {
+    expect(checkShellCommand("rm -rf /").verdict).toBe("block");
+    expect(checkShellCommand("rm -rf /", { destructive: "warn" }).verdict).toBe("warn");
+  });
+  it("does not false-positive on the find -exec ... \\; terminator", () => {
+    expect(checkShellCommand("find . -name '*.js' -exec grep TODO {} \\;").verdict).toBe("allow");
   });
 });
