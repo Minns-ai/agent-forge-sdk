@@ -8,9 +8,11 @@ export type { SimpleAgentConfig, SimpleAgentStep } from "./simple-agent.js";
 export {
   compactMessages,
   gcMessages,
+  microCompact,
   estimateTokens,
   type CompactionOptions,
   type GcOptions,
+  type MicroCompactOptions,
 } from "./pipeline/context-compaction.js";
 export {
   isContextLengthError,
@@ -112,6 +114,12 @@ export { extractFactsFromClaims } from "./memory/fact-extractor.js";
 export type { MemoryIntegration, MemoryResult } from "./memory/provider.js";
 export { MinnsMemory, FileMemory } from "./memory/provider.js";
 export { wrapLegacyClient, isMemoryIntegration } from "./memory/adapter.js";
+export {
+  SessionMemory,
+  InMemorySessionMemoryStore,
+  withSessionMemory,
+} from "./memory/session-memory.js";
+export type { SessionMemoryStore, SessionMemoryConfig } from "./memory/session-memory.js";
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 export { ToolRegistry } from "./tools/tool-registry.js";

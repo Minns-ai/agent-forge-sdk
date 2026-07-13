@@ -117,7 +117,9 @@ npm run dev          # tsc --watch
 npm run clean        # rimraf dist
 ```
 
-No test framework is configured yet. When adding tests, use vitest (ESM-native).
+Tests use vitest (ESM-native). `npm test` runs the suite (`tests/**/*.test.ts`),
+`npm run test:watch` for watch mode. Publishing is gated on the suite in
+`.github/workflows/publish.yml` — a red build never ships.
 
 ## Code Conventions
 
@@ -225,4 +227,4 @@ execute → result size-cap, and never throws.
 - `minns-sdk` (^0.7.2) is a runtime dependency, `@anthropic-ai/sdk` is an optional peer dependency (lazy-loaded)
 - All imports between source files use `.js` extensions (Node16 module resolution)
 - The `dist/` directory is the only thing shipped to npm (plus `.claude/` for the skill)
-- No test suite exists yet — adding one is a good first contribution
+- Test suite lives in `tests/` (vitest); `npm test` runs it and publishing is gated on it
