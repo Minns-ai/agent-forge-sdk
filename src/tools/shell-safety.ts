@@ -174,6 +174,11 @@ function segmentEffect(segment: string): ShellEffect {
  * are `destructive`.
  */
 export function classifyCommandEffect(command: string): ShellEffect {
+  // Whole-command destructive check FIRST: some dangerous shapes (a fork bomb,
+  // for one) span the very separators splitSegments breaks on, so they'd be
+  // invisible to per-segment analysis.
+  if (DESTRUCTIVE.some((d) => d.re.test(command))) return "destructive";
+
   let effect: ShellEffect = "read";
   const segs = splitSegments(command);
   if (segs.length === 0) return "read";

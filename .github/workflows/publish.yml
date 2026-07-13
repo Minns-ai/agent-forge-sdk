@@ -34,6 +34,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Gate publishing on the test suite — a red build never ships to npm.
+      - name: Test
+        run: npm test
+
       # Bump to the next patch ABOVE whatever npm already has, so the published
       # version is always fresh even if the repo's package.json drifted behind
       # the registry (the previous setup never committed the bump back, so it
