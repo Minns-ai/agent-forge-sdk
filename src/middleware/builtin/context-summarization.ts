@@ -33,9 +33,10 @@ export interface ContextSummarizationConfig {
   trigger?: ContextSize;
   /** How many recent messages to keep after summarization. Default: ["fraction", 0.10]. */
   keep?: ContextSize;
-  /** Max tokens for the summary LLM call. Default: 2048 — the structured
+  /** Max tokens for the summary LLM call. Default: 4096 — the structured
    *  9-section summary preserves verbatim code + all user messages, so it needs
-   *  materially more room than a one-paragraph gist. */
+   *  materially more room than a one-paragraph gist, and too small a cap
+   *  truncates the resume-critical tail. */
   summaryMaxTokens?: number;
   /** LLM call purposes to skip. Default: ["summarization"]. */
   skipPurposes?: string[];
@@ -143,21 +144,24 @@ const SUMMARIZATION_PROMPT =
   "You are compacting a long agent conversation into a summary that REPLACES the " +
   "older transcript. The agent must be able to continue seamlessly from your " +
   "summary alone, so completeness beats brevity. Produce these sections, in order, " +
-  "every one present even if you write \"(none)\":\n\n" +
+  "every one present even if you write \"(none)\".\n\n" +
+  "The sections are ordered by continuation-criticality: if you are running low on " +
+  "space, prioritise sections 1–4 (they are what the agent needs to resume without " +
+  "drifting) and compress the later ones — but NEVER omit 1–4.\n\n" +
   "1. Primary Request and Intent — every explicit user request and the overall goal, in detail.\n" +
-  "2. Key Technical Concepts — technologies, frameworks, and approaches in play.\n" +
-  "3. Files and Code Sections — each file created/modified, WHY it matters, and the " +
-  "important code VERBATIM (exact snippets, signatures, identifiers — not paraphrases).\n" +
-  "4. Errors and Fixes — every error hit and exactly how it was resolved (and any user " +
-  "correction that led to the fix).\n" +
-  "5. Problem Solving — what was solved and any ongoing troubleshooting.\n" +
-  "6. All User Messages — list EVERY non-tool-result user message verbatim. This is " +
-  "critical: it is the record of what the user actually asked and corrected.\n" +
-  "7. Pending Tasks — anything explicitly asked for that is not yet done.\n" +
-  "8. Current Work — precisely what was being done immediately before this summary, " +
+  "2. Current Work — precisely what was being done immediately before this summary, " +
   "with file names and code snippets.\n" +
-  "9. Next Step — the immediate next action, if any, with a DIRECT QUOTE of the most " +
-  "recent task-defining message so intent does not drift.\n\n" +
+  "3. Next Step — the immediate next action, if any, with a DIRECT QUOTE of the most " +
+  "recent task-defining message so intent does not drift.\n" +
+  "4. All User Messages — list EVERY non-tool-result user message verbatim. This is " +
+  "critical: it is the record of what the user actually asked and corrected.\n" +
+  "5. Pending Tasks — anything explicitly asked for that is not yet done.\n" +
+  "6. Files and Code Sections — each file created/modified, WHY it matters, and the " +
+  "important code VERBATIM (exact snippets, signatures, identifiers — not paraphrases).\n" +
+  "7. Errors and Fixes — every error hit and exactly how it was resolved (and any user " +
+  "correction that led to the fix).\n" +
+  "8. Problem Solving — what was solved and any ongoing troubleshooting.\n" +
+  "9. Key Technical Concepts — technologies, frameworks, and approaches in play.\n\n" +
   "Summarize the following conversation:";
 
 const COMPACT_TOOL_SYSTEM_PROMPT =
@@ -219,6 +223,8 @@ export class ContextSummarizationMiddleware implements Middleware {
   private truncateArgs: TruncateArgsSettings | null;
   private maxArgLength: number;
   private truncationText: string;
+  /** One-shot: set by compact_conversation, consumed by the next wrapModelCall. */
+  private forceNextCompaction = false;
 
   // Offloading
   private backend: BackendProtocol | null;
@@ -234,7 +240,7 @@ export class ContextSummarizationMiddleware implements Middleware {
     this.tokenBudget = config.tokenBudget ?? 100_000;
     this.trigger = config.trigger ?? ["fraction", 0.85];
     this.keep = config.keep ?? ["fraction", 0.10];
-    this.summaryMaxTokens = config.summaryMaxTokens ?? 2048;
+    this.summaryMaxTokens = config.summaryMaxTokens ?? 4096;
     this.skipPurposes = new Set(config.skipPurposes ?? ["summarization"]);
 
     // Tier 1 defaults
@@ -296,7 +302,12 @@ export class ContextSummarizationMiddleware implements Middleware {
 
     // ── Tier 2: Full summarization ─────────────────────────────────────
     const tokensAfterTruncation = estimateMessageTokens(messages);
-    const shouldSummarize = resolveThreshold(
+    // A one-shot force from the compact_conversation tool is consumed HERE (not
+    // via a timer-restored trigger, which races the event loop and almost never
+    // takes effect before the next model call).
+    const forced = this.forceNextCompaction;
+    this.forceNextCompaction = false;
+    const shouldSummarize = forced || resolveThreshold(
       this.trigger, messages, tokensAfterTruncation, this.tokenBudget,
     );
 
@@ -360,7 +371,7 @@ export class ContextSummarizationMiddleware implements Middleware {
           let argModified = false;
           for (const [key, value] of Object.entries(tc.arguments)) {
             if (typeof value === "string" && value.length > this.maxArgLength) {
-              newArgs[key] = value.slice(0, 20) + this.truncationText;
+              newArgs[key] = value.slice(0, Math.min(400, this.maxArgLength)) + this.truncationText;
               argModified = true;
             } else {
               newArgs[key] = value;
@@ -386,7 +397,7 @@ export class ContextSummarizationMiddleware implements Middleware {
         this.totalArgTruncations++;
         return {
           ...msg,
-          content: msg.content.slice(0, 20) + this.truncationText,
+          content: msg.content.slice(0, Math.min(400, this.maxArgLength)) + this.truncationText,
         };
       }
 
@@ -456,7 +467,13 @@ export class ContextSummarizationMiddleware implements Middleware {
         { maxTokens: this.summaryMaxTokens },
       );
     } catch {
-      summaryText = "[" + toEvict.length + " messages compacted]";
+      // Summary LLM failed. Do NOT replace real history with a content-free
+      // stub — that is silent, catastrophic context loss. If the evicted
+      // messages were offloaded to a backend they are still retrievable, so we
+      // can proceed with a file-pointer stub; otherwise SKIP compaction this
+      // turn and keep the full transcript, letting a later turn retry.
+      if (!filePath) return messages;
+      summaryText = "[summary generation failed — the full evicted history is preserved in the referenced file above]";
     }
 
     this.totalSummarizations++;
@@ -537,18 +554,11 @@ export class ContextSummarizationMiddleware implements Middleware {
         "Use when moving to a new task, when previous context is no longer needed, " +
         "or when the conversation feels bloated.",
       parameters: {},
-      execute: async (_params, context): Promise<ToolResult> => {
-        // The actual compaction happens in wrapModelCall on the next LLM call.
-        // This tool just signals that the agent wants compaction.
-        // We temporarily lower the trigger to force it.
-        const originalTrigger = this.trigger;
-        this.trigger = ["tokens", 0]; // force next call to compact
-
-        // Restore after a tick (next wrapModelCall will see the lowered trigger)
-        setTimeout(() => {
-          this.trigger = originalTrigger;
-        }, 0);
-
+      execute: async (_params, _context): Promise<ToolResult> => {
+        // Actual compaction happens in wrapModelCall on the next LLM call. Set a
+        // one-shot flag it consumes — reliable, unlike the old timer that
+        // restored the trigger before the next call could read it.
+        this.forceNextCompaction = true;
         return {
           success: true,
           result: {

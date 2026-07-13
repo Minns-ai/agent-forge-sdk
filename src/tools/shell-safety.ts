@@ -29,7 +29,10 @@ export interface ShellSafetyOptions {
    *  generated shell should keep this "block" (default) — substitution is the
    *  primary way to smuggle a command past an allowlist. */
   substitution?: ShellVerdict;
-  /** How to treat a detected destructive command. Default "warn". */
+  /** How to treat a detected destructive command (rm -rf /, fork bomb, dd to a
+   *  device…). Default "block" — the safe default, matching this module's "treat
+   *  block as refuse" contract. Set to "warn" to let destructive commands
+   *  through with a flag instead of refusing them. */
   destructive?: ShellVerdict;
 }
 
@@ -101,7 +104,10 @@ const SUBSTITUTION = [
 const PARSER_DIFFERENTIAL = [
   { re: /\r/, why: "carriage return (shell-quote vs bash tokenizer differential)" },
   { re: /\0/, why: "null byte" },
-  { re: /\\[;|&<>]/, why: "backslash-escaped shell operator (double-parse smuggling)" },
+  // Backslash-escaped operators. `\;` is EXCLUDED: in bash it is a literal
+  // semicolon (safe) and is the standard `find … -exec … {} \;` terminator, so
+  // blocking it was a constant false-positive on a common, legitimate idiom.
+  { re: /\\[|&<>]/, why: "backslash-escaped shell operator (double-parse smuggling)" },
 ];
 
 const SENSITIVE = [
@@ -222,7 +228,7 @@ export function checkShellCommand(command: string, options: ShellSafetyOptions =
 
   // Destructive shapes — severity caller-configurable (default warn).
   if (effect === "destructive") {
-    const destVerdict = options.destructive ?? "warn";
+    const destVerdict = options.destructive ?? "block";
     const matched = DESTRUCTIVE.filter((d) => d.re.test(command)).map((d) => d.why);
     reasons.push(...matched);
     verdict = worse(verdict, destVerdict);
