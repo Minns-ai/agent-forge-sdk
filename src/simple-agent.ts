@@ -56,6 +56,28 @@ export interface SimpleAgentConfig {
   maxBudgetUsd?: number;
   /** Model id used to price token usage for `maxBudgetUsd` accounting. */
   model?: string;
+  /** Structural goal verification (native loop only): when the model stops
+   *  calling tools, the loop does NOT immediately accept "done" — it VERIFIES the
+   *  goal is actually met (gather → act → verify → repeat), the SOTA loop shape.
+   *  - `true`: the LLM self-verifies; if the goal isn't fully met, the gap is fed
+   *    back and the loop continues.
+   *  - a function: your own verifier (e.g. run a test suite) → {verified, feedback}.
+   *  Off by default. Bounded by `maxVerifyRounds` so it can't loop forever. */
+  verifyGoal?:
+    | boolean
+    | ((ctx: { task: string; summary: string; toolResults: ToolResult[] }) => Promise<{ verified: boolean; feedback?: string }>);
+  /** Max verify→continue rounds before the loop accepts completion anyway
+   *  (so a perfectionist verifier can't spin forever). Default 2. */
+  maxVerifyRounds?: number;
+  /** LLM-based, recall-oriented history compaction (native loop): once the
+   *  transcript passes ~this many tokens, old turns are summarized by the model
+   *  (recent turns kept verbatim) instead of only mechanically truncated. Off when
+   *  unset. */
+  compactionThresholdTokens?: number;
+  /** Approx model context window in tokens. When set, the loop tells the model how
+   *  much context remains after each tool round, nudging it to finish before
+   *  overflow (an emerging context-awareness practice). Off when unset. */
+  contextWindowTokens?: number;
   /** Which tool-invocation loop to run:
    *  - "native": use the provider's `completeWithTools` (structured tool_use/
    *    tool_result blocks, parallel tool fan-out, in-loop context compaction) —
@@ -509,10 +531,15 @@ export class SimpleAgent {
       { role: "system", content: this.systemPrompt },
       { role: "user", content: task },
     ];
+    let verifyRounds = 0;
+    const maxVerifyRounds = this.config.maxVerifyRounds ?? 2;
 
     for (let step = 0; step < maxIterations; step++) {
-      // In-loop compaction so a long transcript never overflows the window.
+      // In-loop compaction so a long transcript never overflows the window:
+      // mechanical first (cheap), then recall-oriented LLM summarization if the
+      // transcript is still over the configured token threshold.
       messages = compactMessages(messages);
+      messages = await this.llmCompact(messages);
 
       const disclosedTools = this.toolRegistry.definitions().filter((t) => this.disclosed.has(t.name));
       const toolSpecs = buildToolSpecs(disclosedTools);
@@ -556,9 +583,27 @@ export class SimpleAgent {
         /* observer errors never break the loop */
       }
 
-      // Natural termination — the model answered without requesting tools.
+      // Natural termination — the model answered without requesting tools. But
+      // don't just trust "the model stopped": if goal-verification is on, CHECK
+      // the goal is actually met (gather → act → verify → repeat). A failed check
+      // feeds the gap back and continues the loop, bounded by maxVerifyRounds.
       if (response.toolCalls.length === 0) {
-        doneMessage = response.content || "Task completed.";
+        const candidate = response.content || "Task completed.";
+        if (this.config.verifyGoal && verifyRounds < maxVerifyRounds) {
+          const verdict = await this.verifyGoalMet(task, candidate, toolResults);
+          if (!verdict.verified) {
+            verifyRounds++;
+            const gap = verdict.feedback?.trim() || "The goal is not fully met yet.";
+            reasoning.push(`Step ${step + 1}: goal check FAILED — ${gap}`);
+            messages.push({ role: "assistant", content: candidate });
+            messages.push({
+              role: "user",
+              content: `Not done yet — the goal is NOT fully met: ${gap}\nKeep working (use tools) until it is, then give your final summary.`,
+            });
+            continue;
+          }
+        }
+        doneMessage = candidate;
         stopReason = "done";
         break;
       }
@@ -614,6 +659,10 @@ export class SimpleAgent {
       for (const call of response.toolCalls) {
         messages.push({ role: "tool", content: results.get(call.id) ?? "no result", toolCallId: call.id });
       }
+      // Context-awareness: once the window is filling up, tell the model so it
+      // wraps up before overflow instead of getting cut off mid-task.
+      const note = this.contextNote(messages);
+      if (note) messages.push({ role: "user", content: note });
       if (capped) {
         stopReason = "max_tool_calls";
         break;
@@ -640,5 +689,92 @@ export class SimpleAgent {
       ...(trackCost ? { usdCost } : {}),
       ...(permissionDenials.length ? { permissionDenials } : {}),
     };
+  }
+
+  /** Structural goal check: is the task ACTUALLY complete, or did the model just
+   *  stop? Uses a custom verifier when provided, else an LLM self-check. Fails
+   *  OPEN (verified:true) on a verifier error so a flaky check never traps the
+   *  loop. */
+  private async verifyGoalMet(
+    task: string,
+    summary: string,
+    toolResults: ToolResult[],
+  ): Promise<{ verified: boolean; feedback?: string }> {
+    if (typeof this.config.verifyGoal === "function") {
+      try {
+        return await this.config.verifyGoal({ task, summary, toolResults });
+      } catch {
+        return { verified: true };
+      }
+    }
+    // LLM self-verification.
+    const actions = toolResults
+      .slice(-12)
+      .map((r) => `- ${r.success ? "ok" : "FAILED"}: ${JSON.stringify(r.result ?? r.error ?? {}).slice(0, 200)}`)
+      .join("\n");
+    try {
+      const raw = await this.config.llm.complete([
+        {
+          role: "system",
+          content:
+            "You are a STRICT completion verifier. Given the GOAL and what the agent did, decide whether the goal is FULLY achieved — not merely attempted. Be skeptical: if anything required is missing, unverified, or only partially done, it is NOT complete. Respond with ONLY JSON: {\"verified\": boolean, \"missing\": \"<what still needs doing, or empty>\"}.",
+        },
+        {
+          role: "user",
+          content: `GOAL:\n${this.config.directive.goalDescription}\n\nORIGINAL TASK:\n${task}\n\nAGENT'S FINAL SUMMARY:\n${summary}\n\nACTIONS TAKEN (recent):\n${actions || "(none)"}\n\nIs the goal fully achieved?`,
+        },
+      ]);
+      const parsed = safeJsonParse<{ verified?: boolean; missing?: string }>(raw);
+      if (!parsed) return { verified: true }; // unparseable → don't trap the loop
+      return { verified: parsed.verified === true, feedback: parsed.missing };
+    } catch {
+      return { verified: true };
+    }
+  }
+
+  /** Recall-oriented LLM compaction: when the transcript exceeds the configured
+   *  token threshold, summarize the OLDER turns (keeping system, task, and the
+   *  most recent turns verbatim) into one high-fidelity note. Falls back to the
+   *  untouched messages on any failure. */
+  private async llmCompact(messages: LLMMessage[]): Promise<LLMMessage[]> {
+    const threshold = this.config.compactionThresholdTokens;
+    if (!threshold || estimateTokens(messages) <= threshold) return messages;
+    const KEEP_RECENT = 6;
+    if (messages.length <= KEEP_RECENT + 2) return messages; // too short to compact usefully
+    const head = messages[0]?.role === "system" ? [messages[0]] : [];
+    const taskMsg = head.length ? messages[1] : messages[0];
+    const recent = messages.slice(-KEEP_RECENT);
+    const middle = messages.slice(head.length + 1, messages.length - KEEP_RECENT);
+    if (middle.length === 0) return messages;
+    try {
+      const summary = await this.config.llm.complete([
+        {
+          role: "system",
+          content:
+            "Summarize the following agent transcript for CONTINUITY. Maximize RECALL first: preserve every decision made, tool result that matters, fact learned, error hit, and open thread — then tighten for precision. Output a compact factual summary (no preamble).",
+        },
+        { role: "user", content: middle.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`).join("\n").slice(0, 12000) },
+      ]);
+      if (!summary?.trim()) return messages;
+      return [
+        ...head,
+        ...(taskMsg ? [taskMsg] : []),
+        { role: "system", content: `[Summary of earlier steps]\n${summary.trim()}` },
+        ...recent,
+      ];
+    } catch {
+      return messages;
+    }
+  }
+
+  /** A short "context remaining" note when a window size is configured and usage
+   *  is high — nudges the model to wrap up before it overflows. Null otherwise. */
+  private contextNote(messages: LLMMessage[]): string | null {
+    const window = this.config.contextWindowTokens;
+    if (!window) return null;
+    const used = estimateTokens(messages);
+    const pct = Math.round((used / window) * 100);
+    if (pct < 70) return null;
+    return `[Context ~${pct}% full. Prioritize finishing the goal now; avoid unnecessary tool calls.]`;
   }
 }
