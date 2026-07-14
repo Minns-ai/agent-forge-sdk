@@ -59,10 +59,12 @@ export interface SimpleAgentConfig {
   /** Which tool-invocation loop to run:
    *  - "native": use the provider's `completeWithTools` (structured tool_use/
    *    tool_result blocks, parallel tool fan-out, in-loop context compaction) —
-   *    the robust, ref-grade loop. Requires `llm.completeWithTools`.
-   *  - "json": the ReAct JSON-action loop (model emits `{action,...}` as text).
-   *  - "auto" (default): native when the provider supports it, else json.
-   *  Existing providers that only implement `complete()` stay on json. */
+   *    the robust, ref-grade loop. Requires `llm.completeWithTools`; if the
+   *    provider lacks it, falls back to json.
+   *  - "auto": native when the provider supports it, else json.
+   *  - "json" (DEFAULT): the ReAct JSON-action loop (model emits `{action,...}`
+   *    as text). Default so existing callers keep their exact behavior — opt into
+   *    native explicitly (or "auto"). */
   toolCalling?: "auto" | "native" | "json";
 }
 
@@ -219,9 +221,11 @@ export class SimpleAgent {
     const loaded = this.toolRegistry.loadedDefinitions();
     this.disclosed = new Set(loaded.map((t) => t.name));
     const deferredCount = this.toolRegistry.deferredDefinitions().length;
-    const mode = config.toolCalling ?? "auto";
+    // Default "json" preserves existing behavior for every current caller; native
+    // is opt-in (or "auto"). "native" without provider support falls back to json.
+    const mode = config.toolCalling ?? "json";
     this.native =
-      mode === "native" || (mode === "auto" && typeof config.llm.completeWithTools === "function");
+      (mode === "native" || mode === "auto") && typeof config.llm.completeWithTools === "function";
     this.systemPrompt = this.native
       ? buildNativeSystemPrompt(config.directive, deferredCount)
       : buildSystemPrompt(config.directive, loaded, deferredCount);

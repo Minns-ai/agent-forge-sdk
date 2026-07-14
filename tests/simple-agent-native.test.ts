@@ -26,7 +26,7 @@ describe("SimpleAgent native tool-calling loop", () => {
       { content: "calling echo", toolCalls: [call("1", "echo", { v: "hi" })], stopReason: "tool_use" },
       { content: "All done.", toolCalls: [], stopReason: "end_turn" },
     ]);
-    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool] });
+    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool], toolCalling: "native" });
     const r = await agent.run("do it");
     expect(r.stopReason).toBe("done");            // natural termination (no explicit "done" action)
     expect(r.message).toBe("All done.");
@@ -34,13 +34,27 @@ describe("SimpleAgent native tool-calling loop", () => {
     expect(r.toolResults[0].result).toEqual({ echoed: "hi" });
   });
 
-  it("uses native mode automatically when the provider supports completeWithTools", async () => {
+  it("'auto' selects native when the provider supports completeWithTools", async () => {
     const llm = scriptedTools([{ content: "done", toolCalls: [], stopReason: "end_turn" }]);
-    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool] });
+    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool], toolCalling: "auto" });
     // If it were on the JSON loop it would parse "done" as invalid JSON and loop;
     // native mode terminates immediately on empty toolCalls.
     const r = await agent.run("x");
     expect(r.stopReason).toBe("done");
+  });
+
+  it("DEFAULTS to the json loop (backward compatible) even when native is available", async () => {
+    let nativeCalled = false;
+    const llm: LLMProvider = {
+      async complete() { return JSON.stringify({ action: "done", summary: "default json" }); },
+      async *stream() {},
+      async completeWithTools() { nativeCalled = true; return { content: "", toolCalls: [], stopReason: "end_turn" }; },
+    };
+    // No toolCalling option → must stay on json, not silently switch existing callers.
+    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool] });
+    const r = await agent.run("x");
+    expect(nativeCalled).toBe(false);
+    expect(r.message).toBe("default json");
   });
 
   it("falls back to the JSON loop when the provider lacks completeWithTools", async () => {
@@ -73,7 +87,7 @@ describe("SimpleAgent native tool-calling loop", () => {
       { content: "batch", toolCalls: [call("a", "echo", { v: "1" }), call("b", "echo", { v: "2" }), call("c", "echo", { v: "3" })], stopReason: "tool_use" },
       { content: "done", toolCalls: [], stopReason: "end_turn" },
     ]);
-    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool] });
+    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool], toolCalling: "native" });
     const r = await agent.run("x");
     expect(r.toolResults).toHaveLength(3);
     expect(r.toolResults.map((t) => (t.result as { echoed: string }).echoed).sort()).toEqual(["1", "2", "3"]);
@@ -86,7 +100,7 @@ describe("SimpleAgent native tool-calling loop", () => {
       async *stream() {},
       async completeWithTools() { return { content: "again", toolCalls: [call(String(Math.random()), "echo", { v: "x" })], stopReason: "tool_use" }; },
     };
-    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g", maxIterations: 20 }, llm, tools: [echoTool], maxToolCalls: 3 });
+    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g", maxIterations: 20 }, llm, tools: [echoTool], maxToolCalls: 3, toolCalling: "native" });
     const r = await agent.run("loop");
     expect(r.stopReason).toBe("max_tool_calls");
     expect(r.toolResults.length).toBeLessThanOrEqual(3);
@@ -99,7 +113,7 @@ describe("SimpleAgent native tool-calling loop", () => {
     ]);
     const steps: Array<{ action: string; toolName?: string }> = [];
     const agent = new SimpleAgent({
-      directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool],
+      directive: { identity: "T", goalDescription: "g" }, llm, tools: [echoTool], toolCalling: "native",
       onStep: (s) => steps.push({ action: s.action, ...(s.toolName ? { toolName: s.toolName } : {}) }),
     });
     await agent.run("x");
