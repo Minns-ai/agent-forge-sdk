@@ -133,7 +133,7 @@ function buildNativeSystemPrompt(
 
 GOAL: ${directive.goalDescription}${findTools}
 
-You complete the task by calling the available tools. Call tools when you need them (you may call several at once when they're independent). When the task is complete, reply with a plain-text summary of what you accomplished and stop calling tools.`;
+You complete the task by calling the available tools. Before calling a tool, briefly state your reasoning — what you're about to do and why — in one short sentence, THEN make the call. This think-before-acting step matters: decide, in words, before you act. You may call several tools at once when they're independent. When the task is complete, reply with a plain-text summary of what you accomplished and stop calling tools.`;
 }
 
 /** Map ToolDefinitions to the provider's native tool-spec (JSON Schema). */
