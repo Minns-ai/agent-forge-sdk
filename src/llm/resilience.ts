@@ -25,6 +25,31 @@ export interface RetryOptions {
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Thrown when an operation is cancelled via an AbortSignal. Distinct from a
+ *  transient error so retry logic does NOT retry a cancellation. */
+export class AbortError extends Error {
+  constructor(message = "aborted") {
+    super(message);
+    this.name = "AbortError";
+  }
+}
+
+/** Sleep that resolves after `ms`, or rejects with AbortError if `signal` fires.
+ *  Use as `withRetry`'s `sleep` so a cancelled run stops mid-backoff. */
+export const abortableDelay = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new AbortError());
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(new AbortError());
+      },
+      { once: true },
+    );
+  });
+
 /** HTTP status codes worth retrying. */
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 

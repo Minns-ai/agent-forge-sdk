@@ -14,6 +14,8 @@ import type {
 import { ToolRegistry } from "./tools/tool-registry.js";
 import { planToolBatches } from "./tools/tool.js";
 import { safeJsonParse } from "./utils/json.js";
+import { createResilientRunner, isTransientError, abortableDelay, AbortError } from "./llm/resilience.js";
+import type { ResilienceConfig } from "./llm/resilience.js";
 import { estimateCost } from "./llm/usage.js";
 import { estimateTokens, compactMessages } from "./pipeline/context-compaction.js";
 
@@ -78,6 +80,11 @@ export interface SimpleAgentConfig {
    *  much context remains after each tool round, nudging it to finish before
    *  overflow (an emerging context-awareness practice). Off when unset. */
   contextWindowTokens?: number;
+  /** Retry TRANSIENT LLM failures (429/5xx/timeout/network) with exponential
+   *  backoff + jitter, so one blip doesn't kill a run. `true` = defaults; or pass
+   *  RetryOptions (with an optional circuit breaker). Off by default. Backoff is
+   *  cancellation-aware when `run` is given a signal (a cancel won't be retried). */
+  retry?: ResilienceConfig;
   /** Which tool-invocation loop to run:
    *  - "native": use the provider's `completeWithTools` (structured tool_use/
    *    tool_result blocks, parallel tool fan-out, in-loop context compaction) —
@@ -236,6 +243,12 @@ export class SimpleAgent {
    *  the caller didn't force "json"). */
   private native: boolean;
 
+  // Per-run state (set in run()): the cancellation signal and the LLM callers
+  // wrapped with transient-retry when config.retry is on.
+  private signal?: AbortSignal;
+  private callComplete!: LLMProvider["complete"];
+  private callCompleteWithTools?: NonNullable<LLMProvider["completeWithTools"]>;
+
   constructor(config: SimpleAgentConfig) {
     this.config = config;
     this.toolRegistry = new ToolRegistry();
@@ -253,7 +266,31 @@ export class SimpleAgent {
       : buildSystemPrompt(config.directive, loaded, deferredCount);
   }
 
-  async run(task: string): Promise<PipelineResult> {
+  /**
+   * Run the agent to completion. Pass `signal` to cancel a long/runaway run — it
+   * is checked every loop iteration (bounding cancel latency to one LLM turn) and
+   * aborts backoff waits; a cancelled run returns with stopReason "aborted".
+   */
+  async run(task: string, opts: { signal?: AbortSignal } = {}): Promise<PipelineResult> {
+    const signal = opts.signal;
+    this.signal = signal;
+    // Build a resilient LLM runner (reuses the shared resilience primitives).
+    // Signal-awareness: backoff waits abort on cancel, and a cancellation is
+    // NEVER treated as retryable (so a stopped run stops, not loops).
+    let runner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
+    if (this.config.retry) {
+      const base = this.config.retry === true ? {} : this.config.retry;
+      runner = createResilientRunner({
+        ...base,
+        sleep: (ms) => abortableDelay(ms, signal),
+        retryable: (err) =>
+          !(err instanceof AbortError) && !signal?.aborted && (base.retryable ?? isTransientError)(err),
+      });
+    }
+    this.callComplete = (m, o) => runner(() => this.config.llm.complete(m, o));
+    this.callCompleteWithTools = this.config.llm.completeWithTools
+      ? (m, t, o) => runner(() => this.config.llm.completeWithTools!(m, t, o))
+      : undefined;
     if (this.native) return this.runNative(task);
     return this.runJson(task);
   }
@@ -275,14 +312,16 @@ export class SimpleAgent {
     const trackCost = !!this.config.model;
 
     for (let step = 0; step < maxIterations; step++) {
+      if (this.signal?.aborted) { stopReason = "aborted"; break; }
       const messages = buildConversationMessages(this.systemPrompt, task, history);
 
       // ── LLM call ──────────────────────────────────────────────────────
       let rawResponse: string;
       const llmStart = Date.now();
       try {
-        rawResponse = await this.config.llm.complete(messages);
+        rawResponse = await this.callComplete(messages);
       } catch (err: any) {
+        if (err instanceof AbortError || this.signal?.aborted) { stopReason = "aborted"; break; }
         const msg = err?.message || "LLM call failed";
         errors.push(msg);
         reasoning.push(`Step ${step + 1}: LLM error — ${msg}`);
@@ -535,6 +574,7 @@ export class SimpleAgent {
     const maxVerifyRounds = this.config.maxVerifyRounds ?? 2;
 
     for (let step = 0; step < maxIterations; step++) {
+      if (this.signal?.aborted) { stopReason = "aborted"; break; }
       // In-loop compaction so a long transcript never overflows the window:
       // mechanical first (cheap), then recall-oriented LLM summarization if the
       // transcript is still over the configured token threshold.
@@ -548,8 +588,9 @@ export class SimpleAgent {
       let response;
       const llmStart = Date.now();
       try {
-        response = await this.config.llm.completeWithTools!(messages, toolSpecs);
+        response = await this.callCompleteWithTools!(messages, toolSpecs);
       } catch (err: any) {
+        if (err instanceof AbortError || this.signal?.aborted) { stopReason = "aborted"; break; }
         const msg = err?.message || "LLM call failed";
         errors.push(msg);
         reasoning.push(`Step ${step + 1}: LLM error — ${msg}`);
@@ -713,7 +754,7 @@ export class SimpleAgent {
       .map((r) => `- ${r.success ? "ok" : "FAILED"}: ${JSON.stringify(r.result ?? r.error ?? {}).slice(0, 200)}`)
       .join("\n");
     try {
-      const raw = await this.config.llm.complete([
+      const raw = await this.callComplete([
         {
           role: "system",
           content:
@@ -747,7 +788,7 @@ export class SimpleAgent {
     const middle = messages.slice(head.length + 1, messages.length - KEEP_RECENT);
     if (middle.length === 0) return messages;
     try {
-      const summary = await this.config.llm.complete([
+      const summary = await this.callComplete([
         {
           role: "system",
           content:

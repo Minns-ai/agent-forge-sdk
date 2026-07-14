@@ -363,6 +363,7 @@ export type StopReason =
   | "max_iterations"
   | "max_tool_calls"
   | "max_budget"
+  | "aborted"
   | "error";
 
 export interface PipelineResult {

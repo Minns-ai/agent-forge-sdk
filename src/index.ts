@@ -96,6 +96,8 @@ export {
   isTransientError,
   CircuitBreaker,
   createResilientRunner,
+  AbortError,
+  abortableDelay,
 } from "./llm/resilience.js";
 export type {
   RetryOptions,
