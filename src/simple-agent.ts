@@ -2,6 +2,8 @@ import type {
   Directive,
   LLMProvider,
   LLMMessage,
+  LLMToolSpec,
+  LLMToolCall,
   ToolDefinition,
   ToolResult,
   ToolPolicy,
@@ -10,9 +12,10 @@ import type {
   StopReason,
 } from "./types.js";
 import { ToolRegistry } from "./tools/tool-registry.js";
+import { planToolBatches } from "./tools/tool.js";
 import { safeJsonParse } from "./utils/json.js";
 import { estimateCost } from "./llm/usage.js";
-import { estimateTokens } from "./pipeline/context-compaction.js";
+import { estimateTokens, compactMessages } from "./pipeline/context-compaction.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -53,6 +56,14 @@ export interface SimpleAgentConfig {
   maxBudgetUsd?: number;
   /** Model id used to price token usage for `maxBudgetUsd` accounting. */
   model?: string;
+  /** Which tool-invocation loop to run:
+   *  - "native": use the provider's `completeWithTools` (structured tool_use/
+   *    tool_result blocks, parallel tool fan-out, in-loop context compaction) —
+   *    the robust, ref-grade loop. Requires `llm.completeWithTools`.
+   *  - "json": the ReAct JSON-action loop (model emits `{action,...}` as text).
+   *  - "auto" (default): native when the provider supports it, else json.
+   *  Existing providers that only implement `complete()` stay on json. */
+  toolCalling?: "auto" | "native" | "json";
 }
 
 // ─── Prompt builders (self-contained) ────────────────────────────────────────
@@ -105,6 +116,59 @@ Rules:
 - When you have enough information or the task is finished, use "done".`;
 }
 
+/** System prompt for the NATIVE tool-calling loop. Tools are passed via the API
+ *  (not described as JSON actions), so this omits the JSON-format instructions —
+ *  the model calls tools natively and answers in plain text when done. */
+function buildNativeSystemPrompt(
+  directive: SimpleAgentConfig["directive"],
+  deferredCount: number,
+): string {
+  const findTools =
+    deferredCount > 0
+      ? `\n\nMORE TOOLS: ${deferredCount} additional tool(s) are not attached yet. Call the "find_tools" tool with keywords to load matching tools, then call them.`
+      : "";
+  return `${directive.identity}
+
+GOAL: ${directive.goalDescription}${findTools}
+
+You complete the task by calling the available tools. Call tools when you need them (you may call several at once when they're independent). When the task is complete, reply with a plain-text summary of what you accomplished and stop calling tools.`;
+}
+
+/** Map ToolDefinitions to the provider's native tool-spec (JSON Schema). */
+function buildToolSpecs(tools: ToolDefinition[]): LLMToolSpec[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: {
+      type: "object" as const,
+      properties: Object.fromEntries(
+        Object.entries(tool.parameters).map(([name, schema]) => [
+          name,
+          {
+            type: schema.type,
+            ...(schema.description ? { description: schema.description } : {}),
+            ...((schema as { enum?: string[] }).enum ? { enum: (schema as { enum?: string[] }).enum } : {}),
+          },
+        ]),
+      ),
+      required: Object.entries(tool.parameters)
+        .filter(([, schema]) => !schema.optional)
+        .map(([name]) => name),
+    },
+  }));
+}
+
+/** The synthetic find_tools spec, exposed only when tools are deferred. */
+const FIND_TOOLS_SPEC: LLMToolSpec = {
+  name: "find_tools",
+  description: "Discover and load additional tools by keyword before calling them.",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string", description: "keywords describing the tool you need" } },
+    required: ["query"],
+  },
+};
+
 function buildConversationMessages(
   systemPrompt: string,
   task: string,
@@ -144,6 +208,10 @@ export class SimpleAgent {
    *  loaded (non-deferred) set; find_tools promotes deferred tools into it. */
   private disclosed: Set<string>;
 
+  /** True when the native tool-calling loop is active (provider supports it and
+   *  the caller didn't force "json"). */
+  private native: boolean;
+
   constructor(config: SimpleAgentConfig) {
     this.config = config;
     this.toolRegistry = new ToolRegistry();
@@ -151,10 +219,20 @@ export class SimpleAgent {
     const loaded = this.toolRegistry.loadedDefinitions();
     this.disclosed = new Set(loaded.map((t) => t.name));
     const deferredCount = this.toolRegistry.deferredDefinitions().length;
-    this.systemPrompt = buildSystemPrompt(config.directive, loaded, deferredCount);
+    const mode = config.toolCalling ?? "auto";
+    this.native =
+      mode === "native" || (mode === "auto" && typeof config.llm.completeWithTools === "function");
+    this.systemPrompt = this.native
+      ? buildNativeSystemPrompt(config.directive, deferredCount)
+      : buildSystemPrompt(config.directive, loaded, deferredCount);
   }
 
   async run(task: string): Promise<PipelineResult> {
+    if (this.native) return this.runNative(task);
+    return this.runJson(task);
+  }
+
+  private async runJson(task: string): Promise<PipelineResult> {
     const maxIterations = this.config.directive.maxIterations ?? 10;
     const toolResults: ToolResult[] = [];
     const reasoning: string[] = [];
@@ -374,6 +452,185 @@ export class SimpleAgent {
         minns_ms: 0,
         llm_ms: llmMs,
       },
+      errors,
+      stopReason,
+      ...(trackCost ? { usdCost } : {}),
+      ...(permissionDenials.length ? { permissionDenials } : {}),
+    };
+  }
+
+  /**
+   * Native tool-calling loop (ref-grade): the provider returns structured
+   * tool_use blocks; the loop terminates NATURALLY when the model stops
+   * requesting tools, fans out parallel-safe tool calls, and compacts the
+   * transcript in-loop so long runs don't overflow the window. Preserves every
+   * governor + hook (onStep, policy/onApprovalRequired, maxToolCalls,
+   * maxBudgetUsd, find_tools disclosure) and returns the same PipelineResult.
+   */
+  private async runNative(task: string): Promise<PipelineResult> {
+    const maxIterations = this.config.directive.maxIterations ?? 10;
+    const toolResults: ToolResult[] = [];
+    const reasoning: string[] = [];
+    const errors: string[] = [];
+    const permissionDenials: Array<{ tool: string; reason: string }> = [];
+    const startTime = Date.now();
+    let llmMs = 0;
+    let doneMessage = "";
+    let stopReason: StopReason | undefined;
+    let toolCallCount = 0;
+    let usdCost = 0;
+    const trackCost = !!this.config.model;
+
+    const toolContext = {
+      agentId: 0,
+      sessionId: 0,
+      memory: { claims: [] },
+      client: null,
+      sessionState: {
+        iterationCount: 0,
+        goalCompleted: false,
+        goalCompletedAt: null,
+        collectedFacts: {},
+        conversationHistory: [],
+        goalDescription: this.config.directive.goalDescription,
+      },
+      services: {},
+    };
+    const execOpts = {
+      ...(this.config.policy ? { policy: this.config.policy } : {}),
+      ...(this.config.onApprovalRequired ? { onApprovalRequired: this.config.onApprovalRequired } : {}),
+    };
+
+    let messages: LLMMessage[] = [
+      { role: "system", content: this.systemPrompt },
+      { role: "user", content: task },
+    ];
+
+    for (let step = 0; step < maxIterations; step++) {
+      // In-loop compaction so a long transcript never overflows the window.
+      messages = compactMessages(messages);
+
+      const disclosedTools = this.toolRegistry.definitions().filter((t) => this.disclosed.has(t.name));
+      const toolSpecs = buildToolSpecs(disclosedTools);
+      if (this.toolRegistry.deferredDefinitions().length > 0) toolSpecs.push(FIND_TOOLS_SPEC);
+
+      let response;
+      const llmStart = Date.now();
+      try {
+        response = await this.config.llm.completeWithTools!(messages, toolSpecs);
+      } catch (err: any) {
+        const msg = err?.message || "LLM call failed";
+        errors.push(msg);
+        reasoning.push(`Step ${step + 1}: LLM error — ${msg}`);
+        stopReason = "error";
+        break;
+      }
+      llmMs += Date.now() - llmStart;
+
+      if (trackCost) {
+        usdCost += estimateCost(
+          this.config.model!,
+          estimateTokens(messages),
+          estimateTokens([{ role: "assistant", content: response.content ?? "" }]),
+        );
+        if (this.config.maxBudgetUsd !== undefined && usdCost > this.config.maxBudgetUsd) {
+          reasoning.push(`Step ${step + 1}: budget ceiling reached ($${usdCost.toFixed(4)} > $${this.config.maxBudgetUsd})`);
+          stopReason = "max_budget";
+          break;
+        }
+      }
+
+      if (response.content) reasoning.push(`Step ${step + 1}: ${response.content}`);
+      try {
+        this.config.onStep?.({
+          index: step,
+          action: response.toolCalls.length > 0 ? "use_tool" : "done",
+          ...(response.toolCalls[0]?.name ? { toolName: response.toolCalls[0].name } : {}),
+          ...(response.content ? { reasoning: response.content } : {}),
+        });
+      } catch {
+        /* observer errors never break the loop */
+      }
+
+      // Natural termination — the model answered without requesting tools.
+      if (response.toolCalls.length === 0) {
+        doneMessage = response.content || "Task completed.";
+        stopReason = "done";
+        break;
+      }
+
+      // Record the assistant turn WITH its tool calls, so each tool_result below
+      // pairs to a tool_use id (native pairing must stay valid).
+      messages.push({ role: "assistant", content: response.content ?? "", toolCalls: response.toolCalls });
+
+      // Execute the turn's calls with capability-aware scheduling: parallel-safe
+      // (read-only) calls fan out; a writer/destructive/unknown tool serializes.
+      // EVERY tool_use id gets a result (even skipped/capped ones) so pairing holds.
+      const batches = planToolBatches(response.toolCalls, (name) => this.toolRegistry.get(name));
+      let capped = false;
+      const results = new Map<string, string>();
+      const runOne = async (call: LLMToolCall): Promise<void> => {
+        if (call.name === "find_tools") {
+          const q = String((call.arguments as { query?: string }).query ?? "");
+          const matches = this.toolRegistry.search(q);
+          for (const m of matches) this.disclosed.add(m.name);
+          reasoning.push(`Step ${step + 1}: found ${matches.length} tool(s) for "${q}"`);
+          results.set(
+            call.id,
+            matches.length
+              ? `Loaded tools: ${matches.map((m) => m.name).join(", ")}. You can now call them.`
+              : `No tools matched "${q}".`,
+          );
+          return;
+        }
+        if (capped || (this.config.maxToolCalls !== undefined && toolCallCount >= this.config.maxToolCalls)) {
+          capped = true;
+          results.set(call.id, `Not executed: tool-call cap (${this.config.maxToolCalls}) reached.`);
+          return;
+        }
+        if (!this.toolRegistry.has(call.name)) {
+          results.set(call.id, `Error: tool not found: ${call.name}`);
+          return;
+        }
+        if (!this.disclosed.has(call.name)) {
+          results.set(call.id, `Error: tool "${call.name}" is not loaded yet. Use find_tools to load it first.`);
+          return;
+        }
+        const result = await this.toolRegistry.execute(call.name, call.arguments ?? {}, toolContext, execOpts);
+        toolResults.push(result);
+        toolCallCount++;
+        if (result.denied) permissionDenials.push({ tool: call.name, reason: result.error ?? "denied" });
+        results.set(call.id, JSON.stringify(result));
+      };
+      for (const batch of batches) {
+        if (batch.parallel) await Promise.all(batch.calls.map(runOne));
+        else await runOne(batch.calls[0]);
+      }
+      // Append tool_result messages in ORIGINAL request order.
+      for (const call of response.toolCalls) {
+        messages.push({ role: "tool", content: results.get(call.id) ?? "no result", toolCallId: call.id });
+      }
+      if (capped) {
+        stopReason = "max_tool_calls";
+        break;
+      }
+    }
+
+    if (!doneMessage) {
+      doneMessage = reasoning.length > 0 ? reasoning[reasoning.length - 1] : "Reached max iterations without completing.";
+    }
+    if (!stopReason) stopReason = "max_iterations";
+    const totalMs = Date.now() - startTime;
+
+    return {
+      success: errors.length === 0,
+      message: doneMessage,
+      intent: null,
+      memory: { claims: [] },
+      goalProgress: { completed: stopReason === "done", progress: stopReason === "done" ? 1 : 0 },
+      toolResults,
+      reasoning,
+      pipeline: { phases: [], total_ms: totalMs, minns_ms: 0, llm_ms: llmMs },
       errors,
       stopReason,
       ...(trackCost ? { usdCost } : {}),
