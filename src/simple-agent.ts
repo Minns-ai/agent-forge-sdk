@@ -71,6 +71,14 @@ export interface SimpleAgentConfig {
   /** Max verify→continue rounds before the loop accepts completion anyway
    *  (so a perfectionist verifier can't spin forever). Default 2. */
   maxVerifyRounds?: number;
+  /** Tools that INTENTIONALLY pause the run to await user input (human-in-the-
+   *  loop). When any of these is called, the loop ends immediately after the
+   *  tool runs with stopReason "awaiting_input" — WITHOUT triggering verifyGoal
+   *  (an intentional pause is not an incomplete goal, so structural verify must
+   *  not drag the agent back into working). The tool itself is responsible for
+   *  surfacing the question to the user; the run resumes on the next `run()` with
+   *  the user's answer folded into the task. Native loop only. */
+  endTurnTools?: string[];
   /** LLM-based, recall-oriented history compaction (native loop): once the
    *  transcript passes ~this many tokens, old turns are summarized by the model
    *  (recent turns kept verbatim) instead of only mechanically truncated. Off when
@@ -699,6 +707,17 @@ export class SimpleAgent {
       // Append tool_result messages in ORIGINAL request order.
       for (const call of response.toolCalls) {
         messages.push({ role: "tool", content: results.get(call.id) ?? "no result", toolCallId: call.id });
+      }
+      // Intentional human-in-the-loop pause: an end-turn tool (e.g. ask_user) was
+      // called, so END the run now WITHOUT verifyGoal — awaiting input is not an
+      // unmet goal, and structural verify must not drag the agent back to work.
+      if (this.config.endTurnTools?.length) {
+        const paused = response.toolCalls.find((c) => this.config.endTurnTools!.includes(c.name));
+        if (paused) {
+          doneMessage = response.content || "Waiting for your answer.";
+          stopReason = "awaiting_input";
+          break;
+        }
       }
       // Context-awareness: once the window is filling up, tell the model so it
       // wraps up before overflow instead of getting cut off mid-task.
