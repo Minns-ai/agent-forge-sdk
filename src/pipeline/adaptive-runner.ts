@@ -668,13 +668,17 @@ export class AdaptiveRunner {
     const toolContext: ToolContext = pipelineState.toolContext;
     const goalProgress = pipelineState.goalProgress;
 
-    // Build the adaptive system prompt
+    // Build the adaptive system prompt. Pass the reflexion context through so the
+    // constraints/lessons the ReflexionEngine extracted actually reach the model —
+    // previously they were built and stored on pipelineState but never surfaced to
+    // the agentic loop's prompt, so reflexion was inert on this (default) path.
     const systemPrompt = buildAdaptiveSystemPrompt({
       directive: this.directive,
       sessionState,
       claims: pipelineState.memory.claims,
       goalProgress,
       tools: toolSpecs,
+      reflexionContext: pipelineState.reflexionContext,
     });
 
     // Build conversation messages (system prompt will be modified by middleware below)
@@ -701,6 +705,14 @@ export class AdaptiveRunner {
     // finish; the old default of 10 truncated real work.
     const maxSteps = this.directive.maxIterations ?? 25;
     let responseText = "";
+    // Repetition guard: a stuck model that calls the SAME tool with the SAME args
+    // over and over makes no progress and would otherwise burn every step then
+    // return empty. Count identical (name,args) signatures and bail to the wrap-up
+    // once one repeats too many times.
+    const callSig = (tc: { name: string; arguments: unknown }): string =>
+      `${tc.name}:${JSON.stringify(tc.arguments ?? null)}`;
+    const sigCounts = new Map<string, number>();
+    const MAX_IDENTICAL_CALLS = 3;
 
     if (this.llm.completeWithTools && toolSpecs.length > 0) {
       // Native tool calling path
@@ -717,6 +729,18 @@ export class AdaptiveRunner {
 
           // Process any tool calls
           if (response.toolCalls.length > 0) {
+            // Repetition guard — check BEFORE pushing the assistant turn so we bail
+            // on a clean transcript (no dangling tool_use without a tool_result).
+            let repeated = false;
+            for (const tc of response.toolCalls) {
+              const n = (sigCounts.get(callSig(tc)) ?? 0) + 1;
+              sigCounts.set(callSig(tc), n);
+              if (n >= MAX_IDENTICAL_CALLS) repeated = true;
+            }
+            if (repeated) {
+              errors.push(`stopped: a tool was called with identical arguments ${MAX_IDENTICAL_CALLS}x with no progress`);
+              break;
+            }
             // Add assistant message with tool calls
             messages.push({
               role: "assistant",
@@ -760,11 +784,22 @@ export class AdaptiveRunner {
                 toolCallId: toolCall.id,
               });
 
+              // Human-facing activity line: name the tool (and use its describe()
+              // hook when present) so the "watch your agent work" feed shows what
+              // actually ran, not a generic "Tool succeeded".
+              let described: string | undefined;
+              try {
+                described = this.toolRegistry.get(toolCall.name)?.describe?.(toolCall.arguments as Record<string, unknown>);
+              } catch {
+                described = undefined;
+              }
               emit({
                 type: "actions",
                 data: {
                   actions: [{
-                    description: toolResult.success ? "Tool succeeded" : `Failed: ${toolResult.error ?? "unknown"}`,
+                    description: toolResult.success
+                      ? described ?? `${toolCall.name} succeeded`
+                      : `${toolCall.name} failed: ${toolResult.error ?? "unknown"}`,
                     details: toolResult.result ?? {},
                     status: toolResult.success ? "success" : "failed",
                   }],
@@ -797,6 +832,33 @@ export class AdaptiveRunner {
         } catch (err: any) {
           errors.push(err?.message || "Agentic loop step failed");
           break;
+        }
+      }
+
+      // Wrap-up: the loop can exit with NO text answer — it exhausted the step
+      // budget while still calling tools, hit the repetition guard, or broke on a
+      // mid-loop error. Force ONE final completion WITHOUT tools so the agent
+      // synthesizes its best answer from everything gathered instead of returning
+      // an empty string (a user-visible "the agent returned nothing" on exactly the
+      // hard, long-horizon tasks this path is for).
+      if (!responseText.trim()) {
+        try {
+          const wrapUp: LLMMessage[] = compactMessages([
+            ...messages,
+            {
+              role: "user",
+              content:
+                "You have reached your step limit — do NOT call any more tools. " +
+                "Using everything you have gathered so far, give your best, complete final answer now.",
+            },
+          ]);
+          // Reuse the tool-calling path (same message serialization the loop used,
+          // so tool_use/tool_result pairing stays valid) but instruct no more tools
+          // and take the text it produces.
+          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs);
+          responseText = wrap.response.content ?? "";
+        } catch (err: any) {
+          errors.push(err?.message || "wrap-up completion failed");
         }
       }
     } else {
