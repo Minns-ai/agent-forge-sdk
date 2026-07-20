@@ -455,6 +455,14 @@ export interface AgentForgeConfig {
    * ```
    */
   middleware?: import("./middleware/types.js").Middleware[];
+  /** Coarse name/effect-based tool policy applied before each tool runs
+   *  (allow / deny / ask). Pair with `onApprovalRequired` to gate side-effecting
+   *  tools behind human sign-off (e.g. a humanApproval guardrail). */
+  toolPolicy?: ToolExecuteOptions["policy"];
+  /** Called when the policy (or a tool's own checkAccess) requires approval.
+   *  Resolve true to proceed, false to refuse. Absent ⇒ approval-required is
+   *  fail-closed (the call is denied). */
+  onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
 }
 
 export interface RunOptions {

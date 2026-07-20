@@ -10,6 +10,7 @@ import type {
   ToolDefinition,
   ToolResult,
   ToolContext,
+  ToolExecuteOptions,
   MemorySnapshot,
   PipelineResult,
   AgentEvent,
@@ -238,6 +239,11 @@ export class AdaptiveRunner {
   private goalChecker: GoalChecker;
   private maxHistory: number;
   private reasoning: Required<ReasoningConfig>;
+  // Optional HITL gating for the agentic loop's tool calls. A policy + approval
+  // hook let the host require sign-off before a side-effecting tool runs
+  // (e.g. guardrails.humanApproval). Absent ⇒ no gating (back-compatible).
+  private toolPolicy?: ToolExecuteOptions["policy"];
+  private onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
 
   // Reasoning engines
   private metaReasoner: MetaReasoner;
@@ -270,6 +276,8 @@ export class AdaptiveRunner {
     subAgents?: SubAgentDefinition[];
     services?: Record<string, any>;
     middleware?: Middleware[];
+    toolPolicy?: ToolExecuteOptions["policy"];
+    onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
   }) {
     this.directive = resolveDirective(params.directive);
     this.llm = params.llm;
@@ -277,6 +285,8 @@ export class AdaptiveRunner {
     this.agentId = params.agentId;
     this.goalChecker = params.goalChecker ?? defaultGoalChecker;
     this.maxHistory = params.maxHistory ?? 20;
+    this.toolPolicy = params.toolPolicy;
+    this.onApprovalRequired = params.onApprovalRequired;
     this.reasoning = {
       adaptiveCompute: true,
       treeSearch: false,
@@ -759,9 +769,13 @@ export class AdaptiveRunner {
             );
             const executed: Array<{ toolCall: (typeof response.toolCalls)[number]; toolResult: ToolResult }> = [];
             for (const batch of batches) {
+              const execOpts: ToolExecuteOptions | undefined =
+                this.toolPolicy || this.onApprovalRequired
+                  ? { policy: this.toolPolicy, onApprovalRequired: this.onApprovalRequired }
+                  : undefined;
               const run = (toolCall: (typeof response.toolCalls)[number]) =>
                 this.toolRegistry
-                  .execute(toolCall.name, toolCall.arguments, toolContext)
+                  .execute(toolCall.name, toolCall.arguments, toolContext, execOpts)
                   .then((toolResult) => ({ toolCall, toolResult }));
               if (batch.parallel) {
                 executed.push(...(await Promise.all(batch.calls.map(run))));

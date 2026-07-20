@@ -108,6 +108,8 @@ export class AgentForge {
       subAgents: this.config.subAgents,
       services: this.config.services,
       middleware: this.config.middleware,
+      toolPolicy: this.config.toolPolicy,
+      onApprovalRequired: this.config.onApprovalRequired,
     });
   }
 
