@@ -96,15 +96,30 @@ export class AnthropicProvider implements LLMProvider {
       if (m.role === "system") {
         systemText += (systemText ? "\n\n" : "") + m.content;
       } else if (m.role === "tool" && m.toolCallId) {
-        // Tool result message → Anthropic format
-        msgs.push({
-          role: "user",
-          content: [{
-            type: "tool_result",
-            tool_use_id: m.toolCallId,
-            content: m.content,
-          }],
-        });
+        // Tool result → Anthropic tool_result block. Mark failures with is_error
+        // so Claude treats them as recoverable and self-corrects (2-3 retries)
+        // rather than giving up.
+        const block: any = {
+          type: "tool_result",
+          tool_use_id: m.toolCallId,
+          content: m.content,
+        };
+        if (/"success"\s*:\s*false/.test(m.content ?? "")) block.is_error = true;
+        // Batch CONSECUTIVE tool results into a SINGLE user message. Parallel
+        // tool calls must return all their tool_result blocks together; emitting
+        // one user message per result trains Claude to expect user input after
+        // every tool use, which causes empty end_turn responses.
+        const last = msgs[msgs.length - 1];
+        if (
+          last &&
+          last.role === "user" &&
+          Array.isArray(last.content) &&
+          last.content.every((b: any) => b?.type === "tool_result")
+        ) {
+          last.content.push(block);
+        } else {
+          msgs.push({ role: "user", content: [block] });
+        }
       } else if (m.role === "assistant" && m.toolCalls?.length) {
         // Assistant message with tool calls → Anthropic format
         const content: any[] = [];

@@ -885,6 +885,32 @@ export class AdaptiveRunner {
       }
     }
 
+    // Guarantee a user-facing answer. The loop stops on "no tool calls", but it
+    // can also exit with EMPTY text: max steps reached while still tool-calling,
+    // or an LLM step threw and broke out. A deployed agent's answer IS its return
+    // value (the harness delivers it), so an empty return means the user hears
+    // nothing. Force one final turn WITHOUT tools so the model must synthesize an
+    // answer from the tool results it already gathered; if even that yields
+    // nothing, fall back to an honest message rather than silence.
+    if (!responseText.trim()) {
+      try {
+        messages.push({
+          role: "user",
+          content:
+            "Based on the information and tool results above, write your final " +
+            "answer to the user now, directly and concisely. Do not call any more tools.",
+        });
+        responseText = (await this.llm.complete(messages)).trim();
+      } catch (err: any) {
+        errors.push(err?.message || "final synthesis failed");
+      }
+      if (!responseText.trim()) {
+        responseText = allToolResults.some((r) => r?.success)
+          ? "I gathered some information but couldn't compose a complete answer. Could you rephrase?"
+          : "I wasn't able to complete that request just now. Please try again.";
+      }
+    }
+
     const phase = timer.endPhase(
       allToolResults.length > 0
         ? `${allToolResults.length} tool calls`
