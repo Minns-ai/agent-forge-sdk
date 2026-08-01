@@ -688,14 +688,33 @@ export class AdaptiveRunner {
     messages: LLMMessage[],
     toolSpecs: LLMToolSpec[],
     via?: NextFn | null,
+    onDelta?: (delta: string) => void,
   ): Promise<{ response: LLMToolResponse; messages: LLMMessage[] }> {
     let current = messages;
     for (let attempt = 0; ; attempt++) {
       try {
-        // Route through the middleware onion when one is wired; otherwise call
-        // the provider directly. Both paths return the same LLMToolResponse.
+        // Three call paths, in preference order:
+        // 1. streamWithTools when the provider supports it AND a delta consumer
+        //    is attached — the answer streams token-by-token (stream_chunk
+        //    events), so time-to-first-token stops being total run time. Note:
+        //    streamed calls bypass wrapModelCall middlewares (a stream cannot
+        //    flow through the request/response onion); system-prompt
+        //    modifications still apply because they act on `messages`.
+        // 2. The middleware onion (via) for non-streaming tool calls.
+        // 3. Direct provider call.
         let response: LLMToolResponse;
-        if (via) {
+        if (onDelta && this.llm.streamWithTools) {
+          let final: LLMToolResponse | null = null;
+          for await (const ev of this.llm.streamWithTools(current, toolSpecs)) {
+            if (ev.type === "text_delta") {
+              if (ev.delta) onDelta(ev.delta);
+            } else if (ev.type === "done") {
+              final = ev.response;
+            }
+          }
+          if (!final) throw new Error("streamWithTools ended without a done event");
+          response = final;
+        } else if (via) {
           const wrapped = await via({
             messages: current,
             tools: toolSpecs,
@@ -792,6 +811,14 @@ export class AdaptiveRunner {
     // Typed terminal state for this run. Default assumes the step cap ends the
     // loop; every exit path below overwrites it with the real reason.
     let stopReason: StopReason = "max_iterations";
+    // Live token streaming: forward provider deltas as stream_chunk events.
+    // Emitting is a no-op when nobody subscribed. Tool-decision turns may
+    // stream brief narration before their tool calls — that is intentional
+    // ("watch the agent work"); the final `message` event remains the
+    // authoritative complete answer.
+    const onDelta = this.llm.streamWithTools
+      ? (delta: string) => emit({ type: "stream_chunk", data: { delta } })
+      : undefined;
     const addUsage = (usage?: { costUsd: number }) => {
       if (usage) pipelineState.usdCost = (pipelineState.usdCost ?? 0) + usage.costUsd;
     };
@@ -821,7 +848,7 @@ export class AdaptiveRunner {
           // compaction uses a token estimate; the call below adds a REACTIVE net
           // that shrinks harder if the provider still rejects it as too long.
           messages = compactMessages(messages);
-          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall);
+          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta);
           messages = recovered.messages;
           const response = recovered.response;
           addUsage(response.usage);
@@ -929,7 +956,7 @@ export class AdaptiveRunner {
               stopReason = "done";
               // Let the model generate a final response with goal-complete context
               try {
-                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall);
+                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta);
                 messages = finalResponse.messages;
                 responseText = finalResponse.response.content ?? "";
                 addUsage(finalResponse.response.usage);
@@ -974,7 +1001,7 @@ export class AdaptiveRunner {
           // Reuse the tool-calling path (same message serialization the loop used,
           // so tool_use/tool_result pairing stays valid) but instruct no more tools
           // and take the text it produces.
-          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs, toolModelCall);
+          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs, toolModelCall, onDelta);
           responseText = wrap.response.content ?? "";
           addUsage(wrap.response.usage);
         } catch (err: any) {
