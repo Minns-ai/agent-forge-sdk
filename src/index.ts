@@ -431,3 +431,13 @@ export type {
   LearningOutcome,
   RecordOutcomeInput,
 } from "./patterns/learning-loop.js";
+
+// ─── Multimodal content blocks (PDF / vision) ───────────────────────────────
+export type { ContentBlock } from "./types.js";
+export {
+  contentToText,
+  textBlock,
+  imageBlock,
+  documentBlock,
+  pdfFromBase64,
+} from "./llm/content.js";

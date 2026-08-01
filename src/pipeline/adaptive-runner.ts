@@ -17,6 +17,7 @@ import type {
   ReasoningConfig,
   RunControls,
   StopReason,
+  ContentBlock,
 } from "../types.js";
 import type { SubAgentDefinition } from "../subagent/types.js";
 import type {
@@ -466,6 +467,11 @@ export class AdaptiveRunner {
    *   (`stopReason: "max_tool_calls"` when hit).
    * - `maxBudgetUsd` — hard cap on accumulated LLM cost, enforced when the
    *   provider reports usage (`stopReason: "max_budget"` when hit).
+   *
+   * `attachments` are multimodal content blocks (images / PDF documents) for
+   * this turn. When present, the user turn is sent to the provider as
+   * `[{type:"text",text:message}, ...attachments]`. Conversation history stays
+   * text-based — only the text `message` is persisted.
    */
   async run(
     message: string,
@@ -474,6 +480,7 @@ export class AdaptiveRunner {
     userId?: string,
     emitter?: AgentEventEmitter,
     controls?: RunControls,
+    attachments?: ContentBlock[],
   ): Promise<PipelineResult> {
     const timer = new PipelineTimer();
     const errors: string[] = [];
@@ -485,6 +492,7 @@ export class AdaptiveRunner {
     // ── Build PipelineState ──────────────────────────────────────────────
     const pipelineState: PipelineState = {
       message,
+      ...(attachments?.length ? { attachments } : {}),
       sessionId,
       userId,
       intent: {
@@ -803,8 +811,14 @@ export class AdaptiveRunner {
       messages.push({ role: entry.role as "user" | "assistant", content: entry.content });
     }
 
-    // Add current message
-    messages.push({ role: "user", content: message });
+    // Add current message. With attachments the user turn is multimodal:
+    // a text block for the message plus the caller-supplied content blocks.
+    const attachments = pipelineState.attachments;
+    messages.push(
+      attachments?.length
+        ? { role: "user", content: [{ type: "text", text: message }, ...attachments] }
+        : { role: "user", content: message },
+    );
 
     // Apply middleware system prompt modifications
     if (!this.middlewareStack.isEmpty) {

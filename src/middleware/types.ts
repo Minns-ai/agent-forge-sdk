@@ -99,6 +99,10 @@ export type NextFn = (request: ModelRequest) => Promise<ModelResponse>;
 export interface PipelineState {
   /** The user's incoming message for this turn */
   message: string;
+  /** Multimodal attachments (images / PDF documents) for this turn. When set,
+   *  the runner builds the user turn as `[{type:"text",text:message},
+   *  ...attachments]`. History persistence stays text-based. */
+  attachments?: import("../types.js").ContentBlock[];
   /** Session ID for this execution */
   sessionId: number;
   /** Optional user ID */

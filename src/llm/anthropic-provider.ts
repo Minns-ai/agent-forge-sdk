@@ -1,5 +1,6 @@
-import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMStreamEvent, LLMToolSpec, LLMToolResponse, LLMToolCall } from "../types.js";
+import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMStreamEvent, LLMToolSpec, LLMToolResponse, LLMToolCall, ContentBlock } from "../types.js";
 import type { AnthropicProviderConfig } from "./types.js";
+import { contentToText } from "./content.js";
 import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
@@ -18,6 +19,42 @@ function usageFromAnthropic(model: string, response: any): TokenUsage {
     cachedInputTokens: cacheRead,
     cacheCreationTokens: cacheCreation,
   });
+}
+
+/**
+ * Map one of our ContentBlock values to Anthropic's native content-block wire
+ * shape (snake_case keys: media_type, file_id). Text, image (base64/url) and
+ * document (base64/url/file, with citations + title pass-through).
+ */
+function toAnthropicBlock(block: ContentBlock): any {
+  switch (block.type) {
+    case "text":
+      return { type: "text", text: block.text };
+    case "image":
+      return {
+        type: "image",
+        source:
+          block.source.type === "base64"
+            ? { type: "base64", media_type: block.source.mediaType, data: block.source.data }
+            : { type: "url", url: block.source.url },
+      };
+    case "document": {
+      let source: any;
+      if (block.source.type === "base64") {
+        source = { type: "base64", media_type: block.source.mediaType, data: block.source.data };
+      } else if (block.source.type === "url") {
+        source = { type: "url", url: block.source.url };
+      } else {
+        source = { type: "file", file_id: block.source.fileId };
+      }
+      return {
+        type: "document",
+        source,
+        ...(block.citations ? { citations: block.citations } : {}),
+        ...(block.title !== undefined ? { title: block.title } : {}),
+      };
+    }
+  }
 }
 
 /** Convert our LLMToolSpec[] to Anthropic's tool format. */
@@ -139,17 +176,20 @@ export class AnthropicProvider implements LLMProvider {
 
     for (const m of messages) {
       if (m.role === "system") {
-        systemText += (systemText ? "\n\n" : "") + m.content;
+        // System messages are string-typed in practice; project defensively.
+        systemText += (systemText ? "\n\n" : "") + contentToText(m.content);
       } else if (m.role === "tool" && m.toolCallId) {
         // Tool result → Anthropic tool_result block. Mark failures with is_error
         // so Claude treats them as recoverable and self-corrects (2-3 retries)
-        // rather than giving up.
+        // rather than giving up. Tool results are string-typed in practice —
+        // degrade any block content to text.
+        const toolText = typeof m.content === "string" ? m.content : contentToText(m.content);
         const block: any = {
           type: "tool_result",
           tool_use_id: m.toolCallId,
-          content: m.content,
+          content: toolText,
         };
-        if (/"success"\s*:\s*false/.test(m.content ?? "")) block.is_error = true;
+        if (/"success"\s*:\s*false/.test(toolText ?? "")) block.is_error = true;
         // Batch CONSECUTIVE tool results into a SINGLE user message. Parallel
         // tool calls must return all their tool_result blocks together; emitting
         // one user message per result trains Claude to expect user input after
@@ -168,8 +208,10 @@ export class AnthropicProvider implements LLMProvider {
       } else if (m.role === "assistant" && m.toolCalls?.length) {
         // Assistant message with tool calls → Anthropic format
         const content: any[] = [];
-        if (m.content) {
-          content.push({ type: "text", text: m.content });
+        if (typeof m.content === "string") {
+          if (m.content) content.push({ type: "text", text: m.content });
+        } else if (m.content?.length) {
+          content.push(...m.content.map(toAnthropicBlock));
         }
         for (const tc of m.toolCalls) {
           content.push({
@@ -180,8 +222,12 @@ export class AnthropicProvider implements LLMProvider {
           });
         }
         msgs.push({ role: "assistant", content });
-      } else {
+      } else if (typeof m.content === "string") {
+        // String content keeps its exact legacy serialization.
         msgs.push({ role: m.role, content: m.content });
+      } else {
+        // Multimodal turn → native Anthropic content blocks.
+        msgs.push({ role: m.role, content: m.content.map(toAnthropicBlock) });
       }
     }
 

@@ -149,9 +149,14 @@ export class PromptCacheMiddleware implements Middleware {
       return next(request);
     }
 
-    // Find the system message
+    // Find the system message (system messages are string-typed in practice —
+    // skip caching on unexpected block content).
     const systemMsg = request.messages.find((m) => m.role === "system");
-    if (!systemMsg || systemMsg.content.length < this.minSystemPromptLength) {
+    if (
+      !systemMsg ||
+      typeof systemMsg.content !== "string" ||
+      systemMsg.content.length < this.minSystemPromptLength
+    ) {
       return next(request);
     }
 

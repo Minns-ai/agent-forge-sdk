@@ -8,6 +8,7 @@ import type {
   NextFn,
 } from "../types.js";
 import type { LLMMessage } from "../../types.js";
+import { contentToText } from "../../llm/content.js";
 
 /**
  * Configuration for the argument truncation middleware.
@@ -53,7 +54,7 @@ function estimateTokens(text: string): number {
 function estimateMessageTokens(messages: LLMMessage[]): number {
   let total = 0;
   for (const msg of messages) {
-    total += 4 + estimateTokens(msg.content);
+    total += 4 + estimateTokens(contentToText(msg.content));
   }
   return total;
 }
@@ -157,6 +158,8 @@ export class ArgumentTruncationMiddleware implements Middleware {
       if (msg.role !== "assistant" && msg.role !== "tool") return msg;
 
       const content = msg.content;
+      // Never split a multimodal block message — truncation is text-only.
+      if (typeof content !== "string") return msg;
       if (content.length <= this.maxArgLength) return msg;
 
       // Truncate the content

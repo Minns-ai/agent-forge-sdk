@@ -159,6 +159,7 @@ export class AgentForge {
       options.userId,
       undefined,
       controlsFrom(options),
+      options.attachments,
     );
 
     // Persist session
@@ -184,6 +185,7 @@ export class AgentForge {
       options.userId,
       emitter,
       controlsFrom(options),
+      options.attachments,
     ).then(async () => {
       await this.sessionStore!.set(sessionKey, sessionState);
     });
@@ -219,6 +221,7 @@ export class AgentForge {
       options.userId,
       emitter,
       controlsFrom(options),
+      options.attachments,
     );
 
     await this.sessionStore!.set(sessionKey, sessionState);

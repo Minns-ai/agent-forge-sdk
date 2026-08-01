@@ -177,9 +177,41 @@ export interface ToolContext {
 
 // ─── LLM ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Multimodal content block — the unit of a rich (non-string) message content.
+ *
+ * - `text` — plain text.
+ * - `image` — base64 or URL image (vision-capable providers).
+ * - `document` — native document input (Anthropic PDFs: base64 up to 32MB /
+ *   600 pages, URL, or a Files-API `file` reference; `citations` enables page
+ *   citations; `title` names the document in prompts and citations).
+ */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      source:
+        | { type: "base64"; mediaType: string; data: string }
+        | { type: "url"; url: string };
+    }
+  | {
+      type: "document";
+      source:
+        | { type: "base64"; mediaType: "application/pdf"; data: string }
+        | { type: "url"; url: string }
+        | { type: "file"; fileId: string };
+      citations?: { enabled: boolean };
+      title?: string;
+    };
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  /** Plain text, or an array of multimodal content blocks (text/image/document).
+   *  String content is serialized exactly as before; block arrays are mapped to
+   *  each provider's native format (Anthropic) or degraded gracefully (OpenAI
+   *  has no document equivalent). System and tool messages stay string-typed in
+   *  practice. */
+  content: string | ContentBlock[];
   /** Tool call ID — required when role is "tool" (tool result message) */
   toolCallId?: string;
   /** Tool calls made by the assistant — present in assistant messages */
@@ -549,6 +581,12 @@ export interface RunControls {
 export interface RunOptions extends RunControls {
   sessionId: number;
   userId?: string;
+  /** Multimodal attachments (images / PDF documents) for this turn. When
+   *  present, the user turn is built as `[{type:"text",text:message},
+   *  ...attachments]` and sent to the provider as content blocks. Conversation
+   *  history stays text-based: only the text `message` is persisted, so
+   *  attachments apply to the current turn only. */
+  attachments?: ContentBlock[];
 }
 
 export type EventHandler = (event: AgentEvent) => void;

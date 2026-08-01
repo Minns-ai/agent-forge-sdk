@@ -1,5 +1,6 @@
-import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMStreamEvent, LLMToolSpec, LLMToolResponse, LLMToolCall } from "../types.js";
+import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMStreamEvent, LLMToolSpec, LLMToolResponse, LLMToolCall, ContentBlock } from "../types.js";
 import type { OpenAIProviderConfig } from "./types.js";
+import { contentToText } from "./content.js";
 import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
@@ -17,22 +18,56 @@ function usageFromOpenAI(provider: string, model: string, payload: any): TokenUs
 }
 
 /**
+ * Map one of our ContentBlock values to an OpenAI content part.
+ * Text and image blocks map natively ({type:"text"} / {type:"image_url"});
+ * document blocks have no OpenAI equivalent and degrade to a text part
+ * (contentToText placeholder, plus an explicit omission marker for base64
+ * PDFs whose payload we drop). Never throws.
+ */
+function toOpenAIContentPart(block: ContentBlock): any {
+  switch (block.type) {
+    case "text":
+      return { type: "text", text: block.text };
+    case "image":
+      return {
+        type: "image_url",
+        image_url: {
+          url:
+            block.source.type === "base64"
+              ? `data:${block.source.mediaType};base64,${block.source.data}`
+              : block.source.url,
+        },
+      };
+    case "document": {
+      let text = contentToText([block]);
+      if (block.source.type === "base64") {
+        text += "\n[PDF document omitted — provider does not support documents]";
+      }
+      return { type: "text", text };
+    }
+  }
+}
+
+/**
  * Convert our LLMMessage format to OpenAI's message format.
  * Handles tool-result messages and assistant messages with tool calls.
+ * String content is serialized exactly as before; ContentBlock[] content
+ * becomes OpenAI content parts (documents degrade to text placeholders).
  */
 function toOpenAIMessages(messages: LLMMessage[]): any[] {
   return messages.map((m) => {
     if (m.role === "tool" && m.toolCallId) {
       return {
         role: "tool",
-        content: m.content,
+        content: typeof m.content === "string" ? m.content : contentToText(m.content),
         tool_call_id: m.toolCallId,
       };
     }
     if (m.role === "assistant" && m.toolCalls?.length) {
+      const text = typeof m.content === "string" ? m.content : contentToText(m.content);
       return {
         role: "assistant",
-        content: m.content || null,
+        content: text || null,
         tool_calls: m.toolCalls.map((tc) => ({
           id: tc.id,
           type: "function",
@@ -43,7 +78,15 @@ function toOpenAIMessages(messages: LLMMessage[]): any[] {
         })),
       };
     }
-    return { role: m.role, content: m.content };
+    if (typeof m.content === "string") {
+      return { role: m.role, content: m.content };
+    }
+    // System messages stay string-typed in practice; if blocks slip through,
+    // degrade to text (the system role does not accept content parts broadly).
+    if (m.role === "system") {
+      return { role: m.role, content: contentToText(m.content) };
+    }
+    return { role: m.role, content: m.content.map(toOpenAIContentPart) };
   });
 }
 

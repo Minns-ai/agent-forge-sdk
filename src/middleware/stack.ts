@@ -306,6 +306,9 @@ export class MiddlewareStack {
     if (systemIdx === -1) return messages;
 
     let systemContent = messages[systemIdx].content;
+    // System messages are string-typed in practice; the modifier hooks take and
+    // return strings, so skip modification on (unexpected) block content.
+    if (typeof systemContent !== "string") return messages;
 
     // Apply each middleware's modifier in order
     for (const mw of this.middlewares) {
