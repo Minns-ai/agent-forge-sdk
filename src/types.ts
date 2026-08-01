@@ -227,6 +227,18 @@ export interface LLMToolResponse {
   usage?: import("./llm/usage.js").TokenUsage;
 }
 
+/**
+ * Events yielded by a streaming tool-calling completion.
+ *
+ * A well-behaved stream yields zero or more `text_delta` events followed by
+ * exactly one `done` event carrying the complete, normalized LLMToolResponse
+ * (including any tool calls, the stop reason, and usage). Consumers that only
+ * want the final response can ignore deltas and read `done`.
+ */
+export type LLMStreamEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "done"; response: LLMToolResponse };
+
 export interface LLMProvider {
   /** Non-streaming completion — returns raw text */
   complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<string>;
@@ -245,6 +257,21 @@ export interface LLMProvider {
     tools: LLMToolSpec[],
     options?: LLMCompletionOptions,
   ): Promise<LLMToolResponse>;
+
+  /**
+   * Streaming native tool calling — yields `text_delta` events as the model
+   * produces text, then exactly one `done` event with the complete normalized
+   * LLMToolResponse (tool calls, stop reason, usage).
+   *
+   * Optional. When present, the agentic loop uses it so the final answer
+   * streams token-by-token (time-to-first-token stops being total run time).
+   * When absent, the loop falls back to completeWithTools.
+   */
+  streamWithTools?(
+    messages: LLMMessage[],
+    tools: LLMToolSpec[],
+    options?: LLMCompletionOptions,
+  ): AsyncGenerator<LLMStreamEvent>;
 }
 
 // ─── Intent State ─────────────────────────────────────────────────────────────
