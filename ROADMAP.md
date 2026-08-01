@@ -11,9 +11,12 @@
 >   SimpleAgent/AdaptiveRunner unification remains open.
 > - **Phase 2 — DONE**: `streamWithTools` in Anthropic + OpenAI providers,
 >   `stream_chunk` emitted from the loop; TTFT no longer equals total run time.
-> - **Phase 3 — PARTIAL**: recursive tool schemas (items/properties/bounds), automatic
+> - **Phase 3 — DONE**: recursive tool schemas (items/properties/bounds), automatic
 >   argument validation at the registry boundary, per-tool timeouts + AbortSignal in
->   ToolContext. Multimodal content blocks (PDF/image) still open.
+>   ToolContext, and multimodal content blocks — `LLMMessage.content` accepts
+>   `ContentBlock[]` (text/image/document incl. native base64 PDF with citations on
+>   Anthropic; graceful text degradation on OpenAI), attachments via
+>   `RunOptions.attachments`, block-aware token estimation in compaction.
 > - **Phase 4/5 — IN PROGRESS**: `src/patterns/` primitives (HITL candidates, verifier,
 >   safety gate, model router, learning loop); builder skill rewritten as a
 >   production-agent interviewer. Examples + CLI still open.
