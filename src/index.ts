@@ -37,7 +37,9 @@ export type {
   LLMMessage,
   LLMCompletionOptions,
   LLMStreamChunk,
+  LLMStreamEvent,
   LLMToolSpec,
+  ToolSpecSchema,
   LLMToolCall,
   LLMToolResponse,
   SessionStore,
@@ -54,6 +56,7 @@ export type {
   GoalChecker,
   ReasoningConfig,
   AgentForgeConfig,
+  RunControls,
   RunOptions,
   IntentState,
 } from "./types.js";
@@ -194,6 +197,9 @@ export { AdaptiveRunner } from "./pipeline/adaptive-runner.js";
 export type { ExecutionTier } from "./pipeline/adaptive-runner.js";
 /** @deprecated Use AdaptiveRunner instead */
 export { PipelineRunner } from "./pipeline/runner.js";
+
+export { validateToolArgs } from "./tools/schema-validator.js";
+export type { ArgValidationResult } from "./tools/schema-validator.js";
 
 // ─── Utils ───────────────────────────────────────────────────────────────────
 export { PipelineTimer } from "./utils/timer.js";

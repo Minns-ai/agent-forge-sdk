@@ -18,6 +18,22 @@ export interface ToolParameterSchema {
   description: string;
   optional?: boolean;
   enum?: string[];
+  /** Element schema for `type: "array"` parameters. Without it, providers with
+   *  strict validation (e.g. OpenAI strict mode) reject the tool spec. */
+  items?: ToolParameterSchema;
+  /** Nested field schemas for `type: "object"` parameters. */
+  properties?: Record<string, ToolParameterSchema>;
+  /** Required keys of a nested object (top-level required-ness comes from the
+   *  absence of `optional` instead). */
+  required?: string[];
+  /** Numeric bounds (type: "number" | "integer"). */
+  minimum?: number;
+  maximum?: number;
+  /** String length bounds. */
+  minLength?: number;
+  maxLength?: number;
+  /** Regex the string value must match (RE2-ish subset; used verbatim). */
+  pattern?: string;
 }
 
 /** What a tool does to the world. Drives concurrency and approval defaults:
@@ -79,6 +95,11 @@ export interface ToolDefinition {
   /** Cap on serialized result size in bytes; larger results are truncated to a
    *  preview with a note. Absent ⇒ the registry default (off unless set). */
   maxResultBytes?: number;
+  /** Wall-clock cap for one execute() call in milliseconds. On expiry the
+   *  registry returns a failed result and the loop moves on — a hanging tool
+   *  no longer hangs the whole agent. Absent ⇒ the registry default (60s);
+   *  0 disables the cap for this tool. */
+  timeoutMs?: number;
   /** Free-form tags for grouping and disclosure search. */
   tags?: string[];
   /** Which host tier runs this tool. Informational — lets the platform route
@@ -148,6 +169,10 @@ export interface ToolContext {
   client: any; // EventGraphDBClient from minns-sdk
   sessionState: SessionState;
   services: Record<string, any>;
+  /** Fires when the run is aborted or the tool's timeout expires. Long-running
+   *  tools should observe it (pass to fetch, poll it in loops) so cancellation
+   *  actually interrupts work instead of only being noticed at the boundary. */
+  signal?: AbortSignal;
 }
 
 // ─── LLM ─────────────────────────────────────────────────────────────────────
@@ -184,6 +209,22 @@ export interface LLMStreamChunk {
  * Distinct from ToolDefinition — this describes the tool schema for the LLM,
  * not the execution function.
  */
+/** JSON-Schema subset carried on tool specs (recursive: arrays via `items`,
+ *  objects via `properties`). Extra keys pass through untouched. */
+export interface ToolSpecSchema {
+  type: string;
+  description?: string;
+  enum?: string[];
+  items?: ToolSpecSchema;
+  properties?: Record<string, ToolSpecSchema>;
+  required?: string[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+}
+
 export interface LLMToolSpec {
   /** Tool name (must match a registered ToolDefinition.name) */
   name: string;
@@ -192,11 +233,7 @@ export interface LLMToolSpec {
   /** JSON Schema for the tool's parameters */
   parameters: {
     type: "object";
-    properties: Record<string, {
-      type: string;
-      description?: string;
-      enum?: string[];
-    }>;
+    properties: Record<string, ToolSpecSchema>;
     required?: string[];
   };
 }

@@ -203,6 +203,30 @@ function buildAdaptiveSystemPrompt(params: {
 
 // ─── Tool Spec Builder ────────────────────────────────────────────────────────
 
+/** Convert a ToolParameterSchema (recursive) into the wire JSON-Schema shape,
+ *  preserving nested `items`/`properties` so array/object parameters emit
+ *  valid schemas instead of bare `type: "array"` stubs. */
+function toSpecSchema(schema: import("../types.js").ToolParameterSchema): import("../types.js").ToolSpecSchema {
+  const out: import("../types.js").ToolSpecSchema = {
+    type: schema.type,
+    ...(schema.description ? { description: schema.description } : {}),
+    ...(schema.enum ? { enum: schema.enum } : {}),
+    ...(schema.minimum !== undefined ? { minimum: schema.minimum } : {}),
+    ...(schema.maximum !== undefined ? { maximum: schema.maximum } : {}),
+    ...(schema.minLength !== undefined ? { minLength: schema.minLength } : {}),
+    ...(schema.maxLength !== undefined ? { maxLength: schema.maxLength } : {}),
+    ...(schema.pattern ? { pattern: schema.pattern } : {}),
+  };
+  if (schema.items) out.items = toSpecSchema(schema.items);
+  if (schema.properties) {
+    out.properties = Object.fromEntries(
+      Object.entries(schema.properties).map(([k, v]) => [k, toSpecSchema(v)]),
+    );
+    if (schema.required) out.required = schema.required;
+  }
+  return out;
+}
+
 function buildToolSpecs(registry: ToolRegistry): LLMToolSpec[] {
   return registry.definitions().map((tool: ToolDefinition) => ({
     name: tool.name,
@@ -210,14 +234,7 @@ function buildToolSpecs(registry: ToolRegistry): LLMToolSpec[] {
     parameters: {
       type: "object" as const,
       properties: Object.fromEntries(
-        Object.entries(tool.parameters).map(([name, schema]) => [
-          name,
-          {
-            type: schema.type,
-            description: schema.description,
-            ...(schema.enum ? { enum: schema.enum } : {}),
-          },
-        ]),
+        Object.entries(tool.parameters).map(([name, schema]) => [name, toSpecSchema(schema)]),
       ),
       required: Object.entries(tool.parameters)
         .filter(([, schema]) => !schema.optional)
@@ -502,6 +519,9 @@ export class AdaptiveRunner {
         client: this.client,
         sessionState,
         services: this.services,
+        // The run's AbortSignal reaches every tool via context.signal so
+        // cancellation interrupts in-flight work, not just loop boundaries.
+        signal: controls?.signal,
       },
       middlewareState: {},
     };
