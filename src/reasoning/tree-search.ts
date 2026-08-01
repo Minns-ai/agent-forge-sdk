@@ -159,8 +159,16 @@ export class TreeSearchEngine {
     // Main search loop
     let currentNodeId = rootId;
     let depth = 0;
+    // Backtracks (`continue` without depth++) must not spin forever: each loop
+    // iteration costs at least one LLM call, so cap total iterations too.
+    let iterations = 0;
+    const maxIterations = this.config.maxDepth * 3;
 
     while (depth < this.config.maxDepth) {
+      if (iterations++ >= maxIterations) {
+        reasoning.push(`Stop: iteration cap reached (${maxIterations}) after repeated backtracks`);
+        break;
+      }
       const goalProgress = goalChecker(sessionState);
       if (goalProgress.completed) {
         reasoning.push("Stop: Goal completed");

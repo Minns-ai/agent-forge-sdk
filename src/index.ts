@@ -366,7 +366,12 @@ export type {
   SubAgentTask,
 } from "./subagent/types.js";
 
-// ─── Pipeline Phases (advanced usage) ────────────────────────────────────────
+// ─── Legacy pipeline phases ──────────────────────────────────────────────────
+// These phases are used ONLY by the deprecated PipelineRunner and the graph
+// pipeline preset — AgentForge's default AdaptiveRunner path does not call
+// them. They remain exported for backward compatibility and for custom
+// pipelines, but new code should not build on them.
+/** @deprecated Legacy phase — not used by the default AdaptiveRunner path. */
 export { runIntentPhase, applyIntentUpdate, createDefaultIntentState } from "./pipeline/phases/intent-phase.js";
 export type { IntentStateUpdate } from "./pipeline/phases/intent-phase.js";
 export { runSemanticWritePhase } from "./pipeline/phases/semantic-write-phase.js";

@@ -404,7 +404,13 @@ export interface ReasoningConfig {
   reflexion?: boolean;
   /** Enable self-critique gate before response (default false) */
   selfCritique?: boolean;
-  /** Enable world model simulation before executing actions (default false — costs extra LLM calls) */
+  /**
+   * @deprecated This flag is not wired to anything — setting it has no effect.
+   * World-model simulation currently runs only inside tree search (enable
+   * `treeSearch` instead). The flag is kept so existing configs still compile;
+   * it will either be wired to a standalone pre-execution simulation gate or
+   * removed in a future minor release.
+   */
   worldModel?: boolean;
 }
 

@@ -723,6 +723,9 @@ export class AdaptiveRunner {
       `${tc.name}:${JSON.stringify(tc.arguments ?? null)}`;
     const sigCounts = new Map<string, number>();
     const MAX_IDENTICAL_CALLS = 3;
+    // Set when the tool-path wrap-up below has already burned a recovery
+    // completion, so the generic guarantee block doesn't fire a SECOND one.
+    let wrapUpAttempted = false;
 
     if (this.llm.completeWithTools && toolSpecs.length > 0) {
       // Native tool calling path
@@ -856,6 +859,7 @@ export class AdaptiveRunner {
       // an empty string (a user-visible "the agent returned nothing" on exactly the
       // hard, long-horizon tasks this path is for).
       if (!responseText.trim()) {
+        wrapUpAttempted = true;
         try {
           const wrapUp: LLMMessage[] = compactMessages([
             ...messages,
@@ -893,16 +897,21 @@ export class AdaptiveRunner {
     // answer from the tool results it already gathered; if even that yields
     // nothing, fall back to an honest message rather than silence.
     if (!responseText.trim()) {
-      try {
-        messages.push({
-          role: "user",
-          content:
-            "Based on the information and tool results above, write your final " +
-            "answer to the user now, directly and concisely. Do not call any more tools.",
-        });
-        responseText = (await this.llm.complete(messages)).trim();
-      } catch (err: any) {
-        errors.push(err?.message || "final synthesis failed");
+      // Only spend a recovery completion if the tool-path wrap-up hasn't already
+      // tried (and failed) — two serialized recovery calls on the slowest turns
+      // doubled the latency penalty for no extra signal.
+      if (!wrapUpAttempted) {
+        try {
+          messages.push({
+            role: "user",
+            content:
+              "Based on the information and tool results above, write your final " +
+              "answer to the user now, directly and concisely. Do not call any more tools.",
+          });
+          responseText = (await this.llm.complete(messages)).trim();
+        } catch (err: any) {
+          errors.push(err?.message || "final synthesis failed");
+        }
       }
       if (!responseText.trim()) {
         responseText = allToolResults.some((r) => r?.success)
