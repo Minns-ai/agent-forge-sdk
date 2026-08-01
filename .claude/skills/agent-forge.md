@@ -1,343 +1,274 @@
 # @minns/agent-forge — Claude Code Skill
 
-You are helping a developer build agents with the `@minns/agent-forge` SDK. This is a TypeScript agent framework powered by `minns-sdk` as the memory layer. It has a 13-phase execution pipeline, pluggable LLM providers (OpenAI-compatible + Anthropic), built-in tools, session persistence, and advanced reasoning engines (MCTS tree search, reflexion, self-critique, world model, adaptive compute, sub-agent delegation).
+You are helping a developer build **production** agents with the `@minns/agent-forge` SDK
+(TypeScript, ESM, strict). The SDK provides an adaptive execution engine (`AgentForge` →
+`AdaptiveRunner` tool loop; `SimpleAgent` for headless single-shot tasks), pluggable LLM
+providers with native tool calling and token streaming, a policy-gated tool registry with
+argument validation and timeouts, composable middleware, per-run governance rails
+(AbortSignal / tool-call cap / budget cap, typed `stopReason`), optional minns-sdk memory,
+and production-pattern primitives (HITL candidates, verifier, safety gate, model router,
+learning loop) distilled from real deployed systems.
 
-When the user asks you to scaffold, guide, or debug an agent built with this SDK, follow the instructions below.
+Your job is NOT to emit the minimal boilerplate. It is to scaffold an agent that is safe
+and operable on day one. Follow the process below.
+
+---
+
+## The production-agent process (follow this order)
+
+When the user asks for an agent ("build me a customer-success agent", "an agent that
+processes invoices"), interview first, then scaffold. Ask (batched, briefly):
+
+1. **What must never happen?** (mass deletion, emailing the wrong person, double-charging)
+   → becomes the `SafetyGate` deny/confirm patterns and `toolPolicy` deny list.
+2. **Which actions need a human's sign-off?** (sends, writes to production systems, money)
+   → those tools get `effect: "write"` / `"destructive"` and are wrapped as HITL
+   candidates (propose, don't execute).
+3. **What domain rules govern decisions?** (business hours, compliance rules, SLAs,
+   pricing bands) → these become a **deterministic TypeScript module with zero framework
+   imports**, called from tools. Never encode domain rules as prompt prose — code is
+   testable, auditable, and free; prompts are none of those.
+4. **What does "done" look like?** → the `goalChecker` and the `Verifier` step.
+5. **Latency/cost envelope?** → model tiers (`ModelRouter`), `maxToolCalls`,
+   `maxBudgetUsd`, streaming for anything conversational.
+
+**The architecture to default to** (the shape production systems converge on):
+
+```
+user/message → SafetyGate.check() → AgentForge.run/stream (LLM parses intent, picks tools)
+                    tools → validate args (automatic) → preflight checks → deterministic
+                            domain engine → writes become CANDIDATES (pending_review)
+human approves/revises → executeApproved() (revised payload wins) → Verifier → outcome log
+```
+
+The LLM narrates and routes; **judgment lives in code**. If you find yourself writing a
+prompt paragraph that says "make sure to respect X limit", stop and put X in a tool or
+domain module instead.
 
 ---
 
 ## Scaffold an Agent
 
-When the user wants to create a new agent, generate working boilerplate. Always use named imports from `@minns/agent-forge` and ESM syntax.
+Always: named imports, ESM, `.js` extensions in relative imports, strict TS.
 
-### Minimal agent
-
-```typescript
-import { AgentForge, OpenAIProvider } from "@minns/agent-forge";
-import { createClient } from "minns-sdk";
-
-const agent = new AgentForge({
-  directive: {
-    identity: "You are a helpful assistant.",
-    goalDescription: "Help the user with their request",
-    domain: "general",
-  },
-  llm: new OpenAIProvider({
-    apiKey: process.env.OPENAI_API_KEY!,
-    model: "gpt-4o-mini",
-  }),
-  memory: createClient({ baseUrl: process.env.MINNS_URL! }),
-  agentId: 1,
-});
-
-const result = await agent.run("Hello!", { sessionId: 1, userId: "user-1" });
-console.log(result.message);
-```
-
-### Custom tool template
-
-```typescript
-import type { ToolDefinition } from "@minns/agent-forge";
-
-const myTool: ToolDefinition = {
-  name: "tool_name",
-  description: "What this tool does — be specific, the LLM reads this",
-  parameters: {
-    paramName: { type: "string", description: "Description of param" },
-    optionalParam: { type: "number", description: "Optional param", optional: true },
-  },
-  async execute(params, context) {
-    // context has: agentId, sessionId, userId, memory, client, sessionState
-    // Must return { success: boolean, result?: any, error?: string }
-    return { success: true, result: { data: "value" } };
-  },
-};
-```
-
-### Streaming execution
-
-```typescript
-for await (const event of agent.stream("User message", { sessionId: 1, userId: "u1" })) {
-  switch (event.type) {
-    case "stream_chunk":
-      process.stdout.write(event.data.delta);
-      break;
-    case "phase":
-      console.log(`[${event.data.phase}] ${event.data.summary}`);
-      break;
-    case "message":
-      console.log("\nFinal:", event.data.message);
-      break;
-    case "error":
-      console.error("Error:", event.data.error);
-      break;
-  }
-}
-```
-
-### Callback-based execution (for SSE endpoints)
-
-```typescript
-await agent.runWithEvents(
-  "User message",
-  (event) => {
-    if (event.type === "stream_chunk") res.write(`data: ${event.data.delta}\n\n`);
-    if (event.type === "done") res.end();
-  },
-  { sessionId: 1, userId: "u1" },
-);
-```
-
-### Custom session store template
-
-```typescript
-import type { SessionStore, SessionState } from "@minns/agent-forge";
-
-class MySessionStore implements SessionStore {
-  async get(key: string): Promise<SessionState | undefined> {
-    // key format: "{agentId}:{sessionId}"
-    // Return undefined if not found
-  }
-  async set(key: string, state: SessionState): Promise<void> {
-    // Persist the state — it contains conversationHistory, collectedFacts, goalCompleted, etc.
-  }
-  async delete(key: string): Promise<void> {
-    // Remove the session
-  }
-}
-```
-
-### Goal checker template
-
-```typescript
-const agent = new AgentForge({
-  // ...config
-  goalChecker: (state) => {
-    // state.collectedFacts has facts extracted during the conversation
-    // Return { completed: boolean, progress: number (0-1) }
-    const done = !!state.collectedFacts.requiredField;
-    return { completed: done, progress: done ? 1.0 : 0.5 };
-  },
-});
-```
-
-### Full reasoning config
-
-```typescript
-const agent = new AgentForge({
-  // ...config
-  reasoning: {
-    adaptiveCompute: true,    // Meta-reasoner skips phases for trivial queries (default: true)
-    treeSearch: false,         // MCTS-lite instead of flat action loop (default: false)
-    branchingFactor: 3,        // Tree search candidates per step (default: 3)
-    maxDepth: 4,               // Tree search max depth (default: 4)
-    pruneThreshold: 0.3,       // Min score to keep a branch (default: 0.3)
-    reflexion: true,           // Inject past failure constraints (default: true)
-    selfCritique: false,       // Validate response before sending (default: false)
-    worldModel: false,         // Simulate actions before executing (default: false)
-  },
-  subAgents: [
-    {
-      name: "researcher",
-      directive: { identity: "You find information", goalDescription: "Research" },
-      tools: [],               // Subset of tools for this sub-agent
-      llm: cheaperProvider,    // Optional: use a cheaper model
-      maxSteps: 3,
-      phases: ["memory_retrieval", "action_loop"],
-    },
-  ],
-});
-```
-
----
-
-## Guide Usage
-
-### AgentForgeConfig — all options
-
-| Option | Type | Required | Default | Description |
-|--------|------|----------|---------|-------------|
-| `directive` | `Directive` | Yes | — | Agent identity, goal, domain, maxIterations |
-| `llm` | `LLMProvider` | Yes | — | OpenAIProvider or AnthropicProvider |
-| `memory` | `EventGraphDBClient` | Yes | — | `createClient()` from minns-sdk |
-| `agentId` | `number` | Yes | — | Unique agent identifier |
-| `tools` | `ToolDefinition[]` | No | `[]` | Custom tools (built-ins are always registered) |
-| `sessionStore` | `SessionStore` | No | `InMemorySessionStore(10000)` | Session persistence backend |
-| `goalChecker` | `GoalChecker` | No | `defaultGoalChecker` | `(state) => GoalProgress` |
-| `maxHistory` | `number` | No | `20` | Conversation history cap |
-| `reasoning` | `ReasoningConfig` | No | `{ adaptiveCompute: true, reflexion: true }` | Reasoning engine toggles |
-| `subAgents` | `SubAgentDefinition[]` | No | `[]` | Child agents for delegation |
-
-### Directive fields
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `identity` | `string` | Yes | — | System prompt / personality |
-| `goalDescription` | `string` | Yes | — | What the agent is trying to accomplish |
-| `domain` | `string` | No | `"generic"` | Domain identifier for memory scoping |
-| `maxIterations` | `number` | No | `3` | Max tool-use loop steps per turn |
-
-### The 13-phase pipeline
-
-```
-1.  Intent Parse         — LLM classifies user intent (inform, request, greet, etc.)
-2.  Semantic Write       — Stores user message as a semantic event in EventGraphDB
-3.  Memory Retrieval     — 4 parallel minns-sdk calls: claims, agent memories, context memories, strategies + fact extraction
-3b. Meta-Reasoning       — Classifies query complexity, decides which phases to skip
-3c. Reflexion            — Extracts DO NOT / MUST DO / PREFER constraints from past failures
-4.  Strategy Fetch       — Gets similar strategies and action suggestions from memory
-5.  Plan Generation      — LLM generates a 2-4 step plan
-6.  Auto-Store           — If intent="inform", automatically stores the fact
-7.  Action Loop          — MCTS tree search or flat tool-use loop
-8.  Store Reasoning      — Records reasoning steps in EventGraphDB
-9.  Goal Check           — Runs goalChecker, handles completion
-10. Response Generation  — LLM generates final response with full context
-10b. Self-Critique       — Validates response, rewrites if rejected
-11. Finalize             — Stores assistant event, updates conversation history
-```
-
-### Event types (stream / runWithEvents)
-
-| Event | Data | Description |
-|-------|------|-------------|
-| `phase` | `{ phase, summary, duration_ms }` | Pipeline phase started/completed |
-| `thinking` | `{ steps[] }` | Reasoning steps from planning |
-| `retrieval` | `{ claims[], memories[], strategies[] }` | Memory retrieval results |
-| `intent` | `{ type, details }` | Classified intent |
-| `actions` | `{ toolResults[] }` | Tool execution results |
-| `message` | `{ message }` | Final response |
-| `stream_chunk` | `{ delta }` | Streaming response token |
-| `pipeline` | `PipelineSummary` | Full phase-by-phase timing |
-| `done` | `PipelineResult` | Complete result |
-| `error` | `{ error, phase? }` | Error event |
-| `complexity` | `{ level, score, skippedPhases[] }` | Adaptive compute assessment |
-| `tree_search` | `{ nodesExplored, llmCalls, bestPath[] }` | MCTS stats |
-| `reflexion` | `{ constraints[], pastFailures[], lessons[] }` | Reflexion constraints |
-| `self_critique` | `{ approved, issues[], confidence }` | Response validation |
-| `sub_agent` | `{ name, task, success, duration }` | Sub-agent result |
-
-### Direct phase access (custom pipelines)
+### Conversational agent (streaming, memory, HITL)
 
 ```typescript
 import {
-  PipelineRunner,
-  runIntentPhase,
-  runMemoryRetrievalPhase,
-  runPlanPhase,
-  runActionLoopPhase,
-  runResponsePhase,
-  runFinalizePhase,
-  // Also available: runSemanticWritePhase, runStrategyPhase,
-  // runAutoStorePhase, runReasoningPhase, defaultGoalChecker, handleGoalCompletion
+  AgentForge, AnthropicProvider, buildTool,
+  SafetyGate, InMemoryCandidateStore, wrapToolAsCandidate, Verifier,
 } from "@minns/agent-forge";
+
+const llm = new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY! });
+const candidates = new InMemoryCandidateStore();
+const gate = new SafetyGate({ locale: "both" });
+
+// Domain judgment: plain module, zero framework imports, unit-tested.
+import { computeRefundDecision } from "./domain/refunds.js";
+
+const decideRefund = buildTool({
+  name: "decide_refund",
+  description: "Deterministically evaluate a refund request against policy",
+  effect: "read",
+  parameters: {
+    orderId: { type: "string", description: "Order id" },
+    amountUsd: { type: "number", description: "Requested amount", minimum: 0 },
+  },
+  async execute(p) {
+    return { success: true, result: computeRefundDecision(p.orderId, p.amountUsd) };
+  },
+});
+
+// Side-effecting tool → HITL candidate (proposes; a human disposes).
+const issueRefund = wrapToolAsCandidate(buildTool({
+  name: "issue_refund",
+  description: "Issue an approved refund",
+  effect: "destructive",
+  parameters: { orderId: { type: "string", description: "Order id" },
+                amountUsd: { type: "number", description: "Amount", minimum: 0 } },
+  async execute(p, ctx) { /* real payment call, observing ctx.signal */ return { success: true }; },
+}), candidates);
+
+const agent = new AgentForge({
+  directive: {
+    identity: "You are the customer-success agent for Acme.",
+    goalDescription: "Resolve the customer's issue or escalate it cleanly",
+    maxIterations: 12,
+  },
+  llm,
+  tools: [decideRefund, issueRefund],
+  agentId: 1,
+});
+
+// Per message:
+const check = gate.check(userMessage);
+if (check.action === "deny") return refuse(check.pattern);
+
+for await (const ev of agent.stream(userMessage, {
+  sessionId, userId,
+  maxToolCalls: 15, maxBudgetUsd: 0.5, signal: req.signal,   // governance rails
+})) {
+  if (ev.type === "stream_chunk") res.write(ev.data.delta);   // token streaming
+  if (ev.type === "done") {
+    // ev.data.stopReason: "done" | "max_iterations" | "max_tool_calls"
+    //                   | "max_budget" | "aborted" | "error"
+  }
+}
 ```
 
-### LLM Providers
+### Headless automation (cron/batch — use SimpleAgent)
 
-**OpenAI-compatible** (OpenAI, Azure, Groq, Together, OpenRouter, Ollama, vLLM):
 ```typescript
-import { OpenAIProvider } from "@minns/agent-forge";
-const llm = new OpenAIProvider({
-  apiKey: "sk-...",
-  model: "gpt-4o-mini",
-  baseUrl: "https://api.openai.com/v1", // default
-  temperature: 0.7,
-  maxTokens: 2048,
-  timeoutMs: 30_000,
+import { SimpleAgent } from "@minns/agent-forge";
+
+// Pre-check FIRST (no LLM spend when there is no work):
+if (await countPendingItems() === 0) return;
+
+const agent = new SimpleAgent({
+  directive: { identity: "...", goalDescription: "..." },
+  llm, tools,
+  toolCalling: "native",
+  maxToolCalls: 40,
+  maxBudgetUsd: 2.0,
+  retry: { attempts: 3 },
+  verifyGoal: async (r) => ({ ok: r.toolResults.some(t => t.success) }),
+});
+const result = await agent.run(taskDescription);
+switch (result.stopReason) { /* done | max_tool_calls | max_budget | error */ }
+```
+
+### Tools: capability metadata is not optional in production
+
+```typescript
+import { buildTool } from "@minns/agent-forge";
+
+const tool = buildTool({
+  name: "search_tickets",
+  description: "Search support tickets — be specific, the model reads this",
+  effect: "read",                      // read | write | destructive
+  timeoutMs: 15_000,                   // hanging tool ≠ hanging agent (default 60s)
+  parameters: {
+    query: { type: "string", description: "Search text", minLength: 2 },
+    filters: {                         // nested schemas are supported
+      type: "object", description: "Filters", optional: true,
+      properties: {
+        status: { type: "string", description: "Status", enum: ["open", "closed"] },
+        ids: { type: "array", description: "Ticket ids",
+               items: { type: "string", description: "id" } },
+      },
+    },
+  },
+  validate(p) {                        // semantic check (structural is automatic)
+    return p.query.trim() ? { ok: true } : { ok: false, error: "query is empty" };
+  },
+  async execute(params, context) {
+    // context: agentId, sessionId, userId, memory, client, sessionState,
+    //          services, signal (fires on abort/timeout — pass it to fetch!)
+    return { success: true, result: { tickets: [] } };
+  },
 });
 ```
 
-**Anthropic** (requires `@anthropic-ai/sdk` peer dependency):
+Arguments the model supplies are **validated against the schema automatically** at the
+registry boundary; failures return a model-readable error and the model self-corrects.
+Reads fan out in parallel; writes serialize; `destructive` auto-asks for approval unless
+allowlisted (`toolPolicy` + `onApprovalRequired` on the config).
+
+### Verification (after the run, before you trust it)
+
 ```typescript
-import { AnthropicProvider } from "@minns/agent-forge";
-const llm = new AnthropicProvider({
-  apiKey: "sk-ant-...",
-  model: "claude-sonnet-4-5-20250929",
-  maxTokens: 2048,
+import { Verifier } from "@minns/agent-forge";
+const verifier = new Verifier(llm);
+const v = await verifier.verify({ task, toolResults: result.toolResults, finalMessage: result.message });
+// v.verdict: "confirmed" | "partial" | "unverified" — non-blocking, never throws.
+// Targets the classic failure: an agent that REPORTS success without having done anything.
+```
+
+### Model tiering (spend tokens reluctantly)
+
+```typescript
+import { ModelRouter } from "@minns/agent-forge";
+const router = new ModelRouter({
+  light: new OpenAIProvider({ apiKey, model: "gpt-4o-mini" }),
+  heavy: new AnthropicProvider({ apiKey }),
 });
+const llmForStep = router.pick(router.classify(stepDescription));
+```
+
+### Learning from human feedback (conservatively)
+
+```typescript
+import { LearningLoop } from "@minns/agent-forge";
+const loop = new LearningLoop({ defaults: { proximity: 25, experience: 20 } });
+// A modified-then-approved outcome is NOT an endorsement — it penalizes only
+// the corrected axes. No adjustment at all until 20 outcomes; drift capped.
+loop.recordOutcome({ weights: ["proximity"], outcome: "modified", correctedAxes: ["proximity"] });
 ```
 
 ---
 
-## Debug Agents
+## Config reference (AgentForgeConfig)
 
-### Empty responses
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `directive` | `Directive` | — | identity, goalDescription, domain, maxIterations (step cap, default 25) |
+| `llm` | `LLMProvider` | — | AnthropicProvider / OpenAIProvider / OpenRouterProvider / custom |
+| `memory` | provider | none | minns-sdk client, FileMemory, InMemoryProvider — optional |
+| `agentId` | number | — | stable identity for memory scoping |
+| `tools` | `ToolDefinition[]` | `[]` | build with `buildTool()` |
+| `toolPolicy` | policy | none | allow/deny/ask lists by name or effect |
+| `onApprovalRequired` | handler | fail-closed | approver for `ask` outcomes |
+| `middleware` | `Middleware[]` | `[]` | wrapModelCall now runs on the tool loop too |
+| `reasoning` | config | adaptiveCompute+reflexion | treeSearch/selfCritique opt-in; `worldModel` is deprecated (not wired) |
+| `sessionStore` | store | LRU in-memory | implement `SessionStore` for durability |
 
-**Symptoms:** `result.message` is empty or undefined.
+Run options (`run` / `stream` / `runWithEvents`): `sessionId`, `userId`, plus rails:
+`signal` (AbortSignal), `maxToolCalls`, `maxBudgetUsd`.
 
-**Checklist:**
-1. Check LLM config — is `apiKey` set? Is the `model` name valid?
-2. Check `result.errors[]` — LLM failures are captured here, not thrown
-3. Check directive — `identity` must be a non-empty string
-4. Check that `result.success` is true
-5. Try running with events to see which phase fails:
-   ```typescript
-   for await (const event of agent.stream("test", opts)) {
-     console.log(event.type, JSON.stringify(event.data).slice(0, 200));
-   }
-   ```
+`PipelineResult`: `message`, `success`, `stopReason`, `usdCost` (when the provider reports
+usage), `toolResults`, `errors[]` (non-fatal, accumulated — phases never throw).
 
-### Memory not returning results
+## Events (stream / runWithEvents)
 
-**Symptoms:** `result.memory.claims` / `.memories` / `.strategies` are empty.
+`stream_chunk` `{delta}` (token streaming — requires a provider with `streamWithTools`;
+Anthropic + OpenAI providers have it), `phase`, `actions`, `message`, `pipeline`, `done`,
+`error`, `complexity`, `self_critique`, `sub_agent`.
 
-**Checklist:**
-1. Verify minns-sdk client config — is `baseUrl` correct and reachable?
-2. Verify `agentId` matches the agent that stored the data
-3. Check that EventGraphDB has data for this agent — use `client.getEventGraph()` directly
-4. Memory retrieval errors are non-fatal — check `result.errors[]` for network/auth issues
-5. For new agents, memories are empty until data is stored via conversations
+## Deploying to the minns control plane
 
-### Tools not executing
+- **Observed tier** (telemetry only): `readMinnsEnv()` + `TelemetryReporter` + `LogShipper`
+  — OTLP GenAI spans tagged `minns.agent_id`; cost/latency/evals show up in opto.
+- **Durable tier**: `serveAgent({ handler })` exposes `POST /v1/invoke`;
+  `createGraphStepHandler` adapts a compiled graph (checkpoints, `needs_approval`).
+- Optimized prompts: after an opto suggestion is accepted, fetch the promoted prompt at
+  `GET /api/workflows/:id/prompt` and use it as the directive identity at boot.
 
-**Symptoms:** Tools are registered but the LLM never calls them.
+---
 
-**Checklist:**
-1. Verify `description` is clear — the LLM uses this to decide when to call the tool
-2. Check `parameters` schema — each param needs `type` and `description`
-3. Verify `execute()` returns `{ success: boolean, result?: any, error?: string }`
-4. Check `directive.maxIterations` — if set to 0, the action loop is skipped
-5. Check adaptive compute — trivial queries skip the action loop. Set `reasoning.adaptiveCompute: false` to test
+## Debugging
 
-### Pipeline errors
+**Empty responses** → check `result.errors[]` (failures accumulate, never throw), then
+`result.stopReason` — `max_iterations`/`max_tool_calls`/`max_budget` mean the rails fired;
+the wrap-up answer is still returned. Watch live with `runWithEvents`.
 
-**Symptoms:** `result.success` is false or unexpected behavior.
+**Tools not executing** → 1) description too vague; 2) structural arg validation may be
+rejecting calls — look for `Invalid arguments for "…"` in tool results (the model usually
+self-corrects next turn); 3) `maxIterations: 0` skips the loop; 4) policy denial —
+`result.toolResults[i].denied === true`.
 
-**Checklist:**
-1. Check `result.errors[]` — all non-fatal phase errors accumulate here
-2. Pipeline errors never throw — a failed memory retrieval won't block response generation
-3. Check `result.pipeline.phases` for timing — a phase taking 0ms likely errored and was skipped
-4. Use `runWithEvents` to see phase-by-phase progress in real time
+**Tool hangs** → per-tool `timeoutMs` (default 60s) returns a failed result; long tools
+must observe `context.signal`.
 
-### Session state issues
+**No streaming** → the provider must implement `streamWithTools` (built-in providers do);
+`stream_chunk` fires for model text, and the final `message` event remains authoritative.
+Note: streamed calls bypass `wrapModelCall` middlewares by design.
 
-**Symptoms:** Conversation history resets, collected facts disappear.
+**Session state resets** → same `sessionId` (+ same `agentId`) across calls; custom stores
+must return `undefined` (not null) on miss.
 
-**Checklist:**
-1. Verify `sessionId` is consistent across calls — session key is `"{agentId}:{sessionId}"`
-2. If using custom `SessionStore`, check `get()` returns `SessionState | undefined`, not null
-3. Default `InMemorySessionStore` has an LRU cap (default 10,000) — old sessions are evicted
-4. `sessionState` fields: `iterationCount`, `goalCompleted`, `collectedFacts`, `conversationHistory`, `goalDescription`
+**Costs too high** → set `maxBudgetUsd`, use `ModelRouter` tiers, pre-check cron work
+before invoking the agent at all, and let adaptive compute skip phases (default on).
 
-### Streaming not working
-
-**Symptoms:** No events emitted, or only `done` event.
-
-**Checklist:**
-1. Use `agent.stream()` (async generator) or `agent.runWithEvents()` (callback)
-2. Make sure you're iterating the async generator: `for await (const event of agent.stream(...))`
-3. Check that your LLM provider supports streaming — `OpenAIProvider` and `AnthropicProvider` both do
-4. The `stream_chunk` event only fires during the response generation phase
-
-### Reasoning engine issues
-
-**Symptoms:** Tree search, reflexion, or self-critique not activating.
-
-**Checklist:**
-1. Check `reasoning` config — each engine has a boolean toggle
-2. Tree search (`treeSearch: true`) replaces the flat action loop — needs tools registered
-3. Reflexion (`reflexion: true`) needs past failures in memory — no constraints on first run
-4. Self-critique (`selfCritique: true`) adds an LLM call after response generation — increases latency
-5. World model (`worldModel: true`) adds simulation before each tool call — increases LLM costs
-6. Adaptive compute (`adaptiveCompute: true`) may skip phases — check `complexity` event for what was skipped
-7. Sub-agents need `subAgents` array in config — check `sub_agent` events for execution results
+**Reasoning engines** → `treeSearch` and `selfCritique` are opt-in and cost extra LLM
+calls; `reflexion` extracts preference constraints from memory claims (needs memory);
+`worldModel` flag is deprecated — it only ever runs inside tree search.

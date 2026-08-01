@@ -1,4 +1,4 @@
-import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMToolSpec, LLMToolResponse, LLMToolCall } from "../types.js";
+import type { LLMProvider, LLMMessage, LLMCompletionOptions, LLMStreamChunk, LLMStreamEvent, LLMToolSpec, LLMToolResponse, LLMToolCall } from "../types.js";
 import type { AnthropicProviderConfig } from "./types.js";
 import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
@@ -18,6 +18,51 @@ function usageFromAnthropic(model: string, response: any): TokenUsage {
     cachedInputTokens: cacheRead,
     cacheCreationTokens: cacheCreation,
   });
+}
+
+/** Convert our LLMToolSpec[] to Anthropic's tool format. */
+function toAnthropicTools(tools: LLMToolSpec[]): any[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.parameters,
+  }));
+}
+
+/**
+ * Normalize an Anthropic message (content blocks + stop_reason) into the
+ * LLMToolResponse shape. Shared by completeWithTools and streamWithTools so
+ * both paths produce byte-identical normalization.
+ */
+function toolResponseFromAnthropic(response: any, usage: TokenUsage): LLMToolResponse {
+  let textContent: string | null = null;
+  const toolCalls: LLMToolCall[] = [];
+
+  for (const block of response?.content ?? []) {
+    if (block.type === "text") {
+      textContent = (textContent ?? "") + block.text;
+    } else if (block.type === "tool_use") {
+      toolCalls.push({
+        id: block.id,
+        name: block.name,
+        arguments: block.input ?? {},
+      });
+    }
+  }
+
+  let stopReason: LLMToolResponse["stopReason"] = "end_turn";
+  if (response?.stop_reason === "tool_use" || toolCalls.length > 0) {
+    stopReason = "tool_use";
+  } else if (response?.stop_reason === "max_tokens") {
+    stopReason = "max_tokens";
+  }
+
+  return {
+    content: textContent?.trim() || null,
+    toolCalls,
+    stopReason,
+    usage,
+  };
 }
 
 /**
@@ -216,12 +261,7 @@ export class AnthropicProvider implements LLMProvider {
     const enableCaching = options?.metadata?.enable_prompt_caching === true;
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
 
-    // Convert tool specs to Anthropic format
-    const anthropicTools = tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.parameters,
-    }));
+    const anthropicTools = toAnthropicTools(tools);
 
     try {
       const response: any = await this.run(() =>
@@ -241,36 +281,7 @@ export class AnthropicProvider implements LLMProvider {
       const usage = usageFromAnthropic(this.model, response);
       this.onUsage?.(usage);
 
-      // Extract text content and tool calls from content blocks
-      let textContent: string | null = null;
-      const toolCalls: LLMToolCall[] = [];
-
-      for (const block of response.content ?? []) {
-        if (block.type === "text") {
-          textContent = (textContent ?? "") + block.text;
-        } else if (block.type === "tool_use") {
-          toolCalls.push({
-            id: block.id,
-            name: block.name,
-            arguments: block.input ?? {},
-          });
-        }
-      }
-
-      // Map stop reason
-      let stopReason: LLMToolResponse["stopReason"] = "end_turn";
-      if (response.stop_reason === "tool_use" || toolCalls.length > 0) {
-        stopReason = "tool_use";
-      } else if (response.stop_reason === "max_tokens") {
-        stopReason = "max_tokens";
-      }
-
-      return {
-        content: textContent?.trim() || null,
-        toolCalls,
-        stopReason,
-        usage,
-      };
+      return toolResponseFromAnthropic(response, usage);
     } catch (error) {
       if (error instanceof LLMError) throw error;
       throw new LLMError(error instanceof Error ? error.message : String(error));
@@ -283,21 +294,86 @@ export class AnthropicProvider implements LLMProvider {
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
 
     try {
-      const stream = client.messages.stream({
-        model: this.model,
-        max_tokens: options?.maxTokens ?? this.maxTokens,
-        temperature: options?.temperature ?? this.temperature,
-        system: system || undefined,
-        messages: msgs,
-        ...(options?.stop ? { stop_sequences: options.stop } : {}),
-      });
+      const stream = client.messages.stream(
+        {
+          model: this.model,
+          max_tokens: options?.maxTokens ?? this.maxTokens,
+          temperature: options?.temperature ?? this.temperature,
+          system: system || undefined,
+          messages: msgs,
+          ...(options?.stop ? { stop_sequences: options.stop } : {}),
+        },
+        // Per-call timeout; disable the SDK's own retries (we own resilience) —
+        // same convention as complete()/completeWithTools().
+        { timeout: this.timeoutMs, maxRetries: 0 },
+      );
 
       for await (const event of stream) {
         if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
           yield { delta: event.delta.text, done: false };
         }
       }
+
+      // Report usage from the accumulated final message (resolves immediately
+      // once the event iteration above has completed).
+      if (typeof stream.finalMessage === "function") {
+        const finalMessage: any = await stream.finalMessage();
+        this.onUsage?.(usageFromAnthropic(this.model, finalMessage));
+      }
+
       yield { delta: "", done: true };
+    } catch (error) {
+      if (error instanceof LLMError) throw error;
+      throw new LLMError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /**
+   * Streaming native tool calling. Yields `text_delta` events as text arrives,
+   * then exactly one `done` event carrying the same normalized LLMToolResponse
+   * that completeWithTools() would have returned (content, toolCalls,
+   * stopReason, usage).
+   *
+   * Uses the SDK's messages.stream() helper: text deltas are forwarded from
+   * content_block_delta events; the complete message (including tool_use
+   * blocks, whose inputs stream as partial JSON and are only reliable once
+   * accumulated) comes from finalMessage().
+   */
+  async *streamWithTools(
+    messages: LLMMessage[],
+    tools: LLMToolSpec[],
+    options?: LLMCompletionOptions,
+  ): AsyncGenerator<LLMStreamEvent> {
+    const client = await this.getClient();
+    const enableCaching = options?.metadata?.enable_prompt_caching === true;
+    const { system, msgs } = this.splitMessages(messages, { enableCaching });
+
+    try {
+      const stream = client.messages.stream(
+        {
+          model: this.model,
+          max_tokens: options?.maxTokens ?? this.maxTokens,
+          temperature: options?.temperature ?? this.temperature,
+          system: system || undefined,
+          messages: msgs,
+          tools: toAnthropicTools(tools),
+          ...(options?.stop ? { stop_sequences: options.stop } : {}),
+        },
+        // Per-call timeout; disable the SDK's own retries (we own resilience).
+        { timeout: this.timeoutMs, maxRetries: 0 },
+      );
+
+      for await (const event of stream) {
+        if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+          yield { type: "text_delta", delta: event.delta.text };
+        }
+      }
+
+      const finalMessage: any = await stream.finalMessage();
+      const usage = usageFromAnthropic(this.model, finalMessage);
+      this.onUsage?.(usage);
+
+      yield { type: "done", response: toolResponseFromAnthropic(finalMessage, usage) };
     } catch (error) {
       if (error instanceof LLMError) throw error;
       throw new LLMError(error instanceof Error ? error.message : String(error));
