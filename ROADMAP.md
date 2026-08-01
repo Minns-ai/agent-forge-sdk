@@ -1,5 +1,27 @@
 # Agent Quality Roadmap
 
+> **Progress (2026-08-01):**
+> - **Phase 0 — DONE**: regex-escape crash fixed, tree-search iteration cap, single
+>   wrap-up, `worldModel` flagged deprecated, legacy phases quarantined, tool output
+>   surfaced in legacy templates.
+> - **Phase 1 — DONE (first slice)**: `wrapModelCall` wired into the native tool loop
+>   (`MiddlewareStack.buildToolModelCall`), per-run rails (AbortSignal / maxToolCalls /
+>   maxBudgetUsd) on the default path, typed `stopReason` + `usdCost` on every
+>   `PipelineResult`, strong prompt sections promoted onto the live path. Full
+>   SimpleAgent/AdaptiveRunner unification remains open.
+> - **Phase 2 — DONE**: `streamWithTools` in Anthropic + OpenAI providers,
+>   `stream_chunk` emitted from the loop; TTFT no longer equals total run time.
+> - **Phase 3 — PARTIAL**: recursive tool schemas (items/properties/bounds), automatic
+>   argument validation at the registry boundary, per-tool timeouts + AbortSignal in
+>   ToolContext. Multimodal content blocks (PDF/image) still open.
+> - **Phase 4/5 — IN PROGRESS**: `src/patterns/` primitives (HITL candidates, verifier,
+>   safety gate, model router, learning loop); builder skill rewritten as a
+>   production-agent interviewer. Examples + CLI still open.
+> - **Control plane**: minns-opto gained the promoted-prompt read API
+>   (`GET /api/resources/:id[/current]`, `GET /api/workflows/:id/prompt`) closing the
+>   optimize→approve→promote→runtime loop, and grounding no longer dials an empty base
+>   URL on the service-token path.
+
 Goal: get `@minns/agent-forge` (and its builder skill) to the point where asking it for an
 agent — a PDF agent, a customer-success agent, an automation agent — produces something at
 the quality level of the agentOrch production agents (email agent, PlanD scheduler,
