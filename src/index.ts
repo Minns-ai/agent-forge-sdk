@@ -389,3 +389,45 @@ export { runReasoningPhase } from "./pipeline/phases/reasoning-phase.js";
 export { defaultGoalChecker, handleGoalCompletion } from "./pipeline/phases/goal-check-phase.js";
 export { runResponsePhase } from "./pipeline/phases/response-phase.js";
 export { runFinalizePhase } from "./pipeline/phases/finalize-phase.js";
+
+// ─── Production Patterns ─────────────────────────────────────────────────────
+// Primitives distilled from production agent systems: HITL propose-don't-
+// execute, LLM-as-judge verification, pre-model safety gating, light/medium/
+// heavy model tiering, and conservative learning guardrails.
+export {
+  InMemoryCandidateStore,
+  defaultCandidateActions,
+  submitCandidate,
+  effectivePayload,
+  wrapToolAsCandidate,
+  executeApproved,
+} from "./patterns/candidate.js";
+export type {
+  Candidate,
+  CandidateStatus,
+  CandidateAction,
+  CandidateResolution,
+  CandidateStore,
+  SubmitCandidateInput,
+} from "./patterns/candidate.js";
+export { Verifier } from "./patterns/verifier.js";
+export type {
+  VerifierOptions,
+  VerifyInput,
+  VerifyOutcome,
+  VerifiedToolStep,
+} from "./patterns/verifier.js";
+export { SafetyGate, assertAllowed } from "./patterns/safety-gate.js";
+export type {
+  SafetyGateOptions,
+  SafetyCheckResult,
+  SafetyLocale,
+} from "./patterns/safety-gate.js";
+export { ModelRouter } from "./patterns/model-router.js";
+export type { ModelTier, ModelTiers } from "./patterns/model-router.js";
+export { LearningLoop } from "./patterns/learning-loop.js";
+export type {
+  LearningLoopConfig,
+  LearningOutcome,
+  RecordOutcomeInput,
+} from "./patterns/learning-loop.js";
