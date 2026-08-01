@@ -471,7 +471,18 @@ export interface AgentForgeConfig {
   onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
 }
 
-export interface RunOptions {
+/** Per-run governance rails for the agent loop. */
+export interface RunControls {
+  /** Abort the run between steps / tool batches (stopReason: "aborted"). */
+  signal?: AbortSignal;
+  /** Hard cap on total tool executions this run (stopReason: "max_tool_calls"). */
+  maxToolCalls?: number;
+  /** Hard cap on accumulated LLM cost in USD, enforced when the provider
+   *  reports usage (stopReason: "max_budget"). */
+  maxBudgetUsd?: number;
+}
+
+export interface RunOptions extends RunControls {
   sessionId: number;
   userId?: string;
 }

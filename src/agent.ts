@@ -1,5 +1,6 @@
 import type {
   AgentForgeConfig,
+  RunControls,
   RunOptions,
   PipelineResult,
   AgentEvent,
@@ -53,6 +54,15 @@ const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, repo
  * const result = await agent.run("Hello!", { sessionId: 123 });
  * ```
  */
+/** Extract the per-run governance rails from RunOptions (undefined if none set). */
+function controlsFrom(options: RunOptions): RunControls | undefined {
+  const { signal, maxToolCalls, maxBudgetUsd } = options;
+  if (signal === undefined && maxToolCalls === undefined && maxBudgetUsd === undefined) {
+    return undefined;
+  }
+  return { signal, maxToolCalls, maxBudgetUsd };
+}
+
 export class AgentForge {
   private config: AgentForgeConfig;
   private sessionStore: AgentForgeConfig["sessionStore"];
@@ -147,6 +157,8 @@ export class AgentForge {
       sessionState,
       options.sessionId,
       options.userId,
+      undefined,
+      controlsFrom(options),
     );
 
     // Persist session
@@ -171,6 +183,7 @@ export class AgentForge {
       options.sessionId,
       options.userId,
       emitter,
+      controlsFrom(options),
     ).then(async () => {
       await this.sessionStore!.set(sessionKey, sessionState);
     });
@@ -205,6 +218,7 @@ export class AgentForge {
       options.sessionId,
       options.userId,
       emitter,
+      controlsFrom(options),
     );
 
     await this.sessionStore!.set(sessionKey, sessionState);

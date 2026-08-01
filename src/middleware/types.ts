@@ -30,6 +30,14 @@ export interface ModelRequest {
   /** LLM completion options (temperature, maxTokens, etc.) */
   options?: LLMCompletionOptions;
   /**
+   * Tool specs for native tool-calling calls. Present only on requests routed
+   * through the tool-calling terminal (`buildToolModelCall`); text-only calls
+   * leave it undefined. Middlewares may inspect or filter it. If a middleware
+   * constructs a fresh request object and drops this field, the terminal falls
+   * back to the loop's original tool specs — dropping it is benign.
+   */
+  tools?: import("../types.js").LLMToolSpec[];
+  /**
    * Semantic label for this LLM call — allows middlewares to behave
    * differently based on what the call is for.
    *
@@ -64,6 +72,12 @@ export interface ModelResponse {
    * Examples: token counts, cache hit/miss stats, latency.
    */
   metadata: Record<string, unknown>;
+  /** Tool calls requested by the model (tool-calling terminal only). */
+  toolCalls?: import("../types.js").LLMToolCall[];
+  /** Why the model stopped (tool-calling terminal only). */
+  stopReason?: import("../types.js").LLMToolResponse["stopReason"];
+  /** Normalized token usage + cost for this call, when the provider reports it. */
+  usage?: import("../llm/usage.js").TokenUsage;
 }
 
 /**
@@ -109,6 +123,10 @@ export interface PipelineState {
   goalProgress: GoalProgress;
   /** The final response message to the user */
   responseMessage: string;
+  /** Typed terminal state of the loop (set by the runner as it exits). */
+  stopReason?: import("../types.js").StopReason;
+  /** Accumulated USD cost across LLM calls this run, when providers report usage. */
+  usdCost?: number;
   /** Complexity assessment from meta-reasoner (null if adaptive compute disabled) */
   complexity: ComplexityAssessment | null;
   /** Reflexion context — constraints from past failures */
