@@ -258,7 +258,7 @@ export type { AsyncTask, AsyncSubAgentConfig } from "./middleware/builtin/async-
 export { MinnsFullPowerMiddleware } from "./middleware/builtin/minns-power.js";
 export type { MinnsFullClient, MinnsFullPowerConfig } from "./middleware/builtin/minns-power.js";
 export { VibeGraphMiddleware, compileVibeGraph, buildAgentGraph } from "./middleware/builtin/vibe-graph.js";
-export type { VibeGraphConfig, VibeGraphIR, VibeGraphNode, VibeGraphEdge, VibeGraphState } from "./middleware/builtin/vibe-graph.js";
+export type { VibeGraphConfig, VibeGraphIR, VibeGraphNode, VibeGraphEdge, VibeGraphState, BuildAgentGraphOptions } from "./middleware/builtin/vibe-graph.js";
 export { MultiAgentMiddleware } from "./middleware/builtin/multi-agent.js";
 export type { MultiAgentClient, MultiAgentConfig } from "./middleware/builtin/multi-agent.js";
 export { HumanInTheLoopMiddleware } from "./middleware/builtin/human-in-the-loop.js";

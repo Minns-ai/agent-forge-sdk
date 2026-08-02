@@ -6,7 +6,14 @@ import type {
   ModelRequest,
   NextFn,
 } from "../types.js";
-import type { ToolDefinition, ToolResult, LLMProvider, LLMMessage } from "../../types.js";
+import type {
+  ToolDefinition,
+  ToolResult,
+  LLMProvider,
+  LLMMessage,
+  ToolPolicy,
+  ToolExecuteOptions,
+} from "../../types.js";
 import { MiddlewareStack } from "../stack.js";
 import { AgentGraph } from "../../graph/graph.js";
 import { END } from "../../graph/types.js";
@@ -218,12 +225,27 @@ export async function compileVibeGraph(
 }
 
 /**
+ * Options threaded into every tool-enabled graph node's SimpleAgent, so
+ * governance applied to the parent agent (permission policy, approval gate)
+ * also governs the node agents — a graph node must not be a policy bypass.
+ */
+export interface BuildAgentGraphOptions {
+  /** Permission policy (allow/deny/ask + destructive auto-ask) applied to every
+   *  tool call made by node agents. */
+  policy?: ToolPolicy;
+  /** Approval gate invoked when policy or a tool's `checkAccess` requires it.
+   *  Absent ⇒ approval-required calls are refused (fail-closed). */
+  onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
+}
+
+/**
  * Compile a VibeGraphIR into an executable AgentGraph.
  */
 export function buildAgentGraph(
   ir: VibeGraphIR,
   llm: LLMProvider,
   parentTools?: ToolDefinition[],
+  opts?: BuildAgentGraphOptions,
 ): AgentGraph<VibeGraphState> {
   const graph = new AgentGraph<VibeGraphState>();
 
@@ -269,6 +291,12 @@ export function buildAgentGraph(
             },
             llm,
             tools: parentTools,
+            // Thread the parent's guardrails into the node agent — SimpleAgent
+            // enforces policy/approval on every tool execution it makes.
+            ...(opts?.policy ? { policy: opts.policy } : {}),
+            ...(opts?.onApprovalRequired
+              ? { onApprovalRequired: opts.onApprovalRequired }
+              : {}),
           });
           const task =
             state.userInput +
