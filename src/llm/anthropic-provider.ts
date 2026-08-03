@@ -4,6 +4,7 @@ import { contentToText } from "./content.js";
 import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
+import { samplingParams } from "./model-caps.js";
 
 /** Extract normalized usage from an Anthropic messages response. Anthropic
  *  reports cache-read and cache-creation separately from input_tokens. */
@@ -265,7 +266,7 @@ export class AnthropicProvider implements LLMProvider {
           {
             model: this.model,
             max_tokens: options?.maxTokens ?? this.maxTokens,
-            temperature: options?.temperature ?? this.temperature,
+            ...samplingParams(this.model, options?.temperature ?? this.temperature),
             system: system || undefined,
             messages: msgs,
             ...(options?.stop ? { stop_sequences: options.stop } : {}),
@@ -315,7 +316,7 @@ export class AnthropicProvider implements LLMProvider {
           {
             model: this.model,
             max_tokens: options?.maxTokens ?? this.maxTokens,
-            temperature: options?.temperature ?? this.temperature,
+            ...samplingParams(this.model, options?.temperature ?? this.temperature),
             system: system || undefined,
             messages: msgs,
             tools: anthropicTools,
@@ -344,7 +345,7 @@ export class AnthropicProvider implements LLMProvider {
         {
           model: this.model,
           max_tokens: options?.maxTokens ?? this.maxTokens,
-          temperature: options?.temperature ?? this.temperature,
+          ...samplingParams(this.model, options?.temperature ?? this.temperature),
           system: system || undefined,
           messages: msgs,
           ...(options?.stop ? { stop_sequences: options.stop } : {}),
@@ -433,7 +434,7 @@ export class AnthropicProvider implements LLMProvider {
         {
           model: this.model,
           max_tokens: options?.maxTokens ?? this.maxTokens,
-          temperature: options?.temperature ?? this.temperature,
+          ...samplingParams(this.model, options?.temperature ?? this.temperature),
           system: system || undefined,
           messages: msgs,
           tools: toAnthropicTools(tools),

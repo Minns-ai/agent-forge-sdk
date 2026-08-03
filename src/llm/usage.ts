@@ -42,6 +42,11 @@ const PRICING: Record<string, ModelPricing> = {
   // Current Claude lineup (longest-prefix wins, so these override claude-opus-4).
   "claude-fable-5": { input: 10, output: 50, cachedInput: 1, cacheWrite: 12.5 },
   "claude-mythos-5": { input: 10, output: 50, cachedInput: 1, cacheWrite: 12.5 },
+  // Opus 5 / Sonnet 5 do NOT prefix-match the 4.x keys below — without their own
+  // entries every call on the current lineup would price at $0 and silently
+  // bypass per-run and daily budget caps.
+  "claude-opus-5": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
+  "claude-sonnet-5": { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 },
   "claude-opus-4-8": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
   "claude-opus-4-7": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },
   "claude-opus-4-6": { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 },

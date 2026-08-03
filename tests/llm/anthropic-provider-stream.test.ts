@@ -136,7 +136,9 @@ describe("AnthropicProvider.streamWithTools", () => {
     const [params, requestOptions] = client.messages.stream.mock.calls[0];
     expect(params.model).toBe("claude-opus-4-8");
     expect(params.max_tokens).toBe(999);
-    expect(params.temperature).toBe(0.1);
+    // Opus 4.8 REJECTS `temperature` with a 400 — the field must be absent from
+    // the body entirely, not sent with a default.
+    expect("temperature" in params).toBe(false);
     expect(params.messages).toEqual([{ role: "user", content: "What's the weather in Paris?" }]);
     expect(params.tools).toEqual([
       {
@@ -146,6 +148,21 @@ describe("AnthropicProvider.streamWithTools", () => {
       },
     ]);
     expect(requestOptions).toEqual({ timeout: 12_345, maxRetries: 0 });
+  });
+
+  it("still sends temperature on models that accept sampling params", async () => {
+    const stream = fakeStream([], { content: [], stop_reason: "end_turn", usage: {} });
+    const client = { messages: { stream: vi.fn(() => stream) } };
+    const provider = new AnthropicProvider({
+      apiKey: "test-key",
+      model: "claude-haiku-4-5",
+      timeoutMs: 12_345,
+    });
+    (provider as any).client = client;
+
+    await collect(provider.streamWithTools(MESSAGES, TOOLS, { temperature: 0.1 }));
+
+    expect(client.messages.stream.mock.calls[0][0].temperature).toBe(0.1);
   });
 
   it("normalizes a text-only end_turn response", async () => {
