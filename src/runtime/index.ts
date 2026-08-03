@@ -11,6 +11,8 @@ export type {
   InvokeRequest,
   InvokeResponse,
   RunStepStatus,
+  ExecuteCandidateRequest,
+  ExecuteCandidateResponse,
 } from "./contract.js";
 
 export { readMinnsEnv, readMcpServersFromEnv } from "./env.js";

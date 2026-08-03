@@ -21,17 +21,33 @@ import type { ToolRegistry } from "../tools/tool-registry.js";
  *   - `wrapToolAsCandidate()`          — converts a write/destructive tool into
  *                                         one that proposes instead of executing
  *   - `executeApproved()`              — runs an approved/revised candidate
- *                                         through the real `ToolRegistry`
+ *                                         through the real `ToolRegistry`,
+ *                                         exactly once, via a CAS claim
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/**
+ * Lifecycle of a proposal.
+ *
+ *   pending_review ──▶ approved ─┐
+ *                 └──▶ revised ──┼──▶ executing ──▶ executed        (success)
+ *                 └──▶ rejected  │            └──▶ approved|revised (retryable failure)
+ *                                │            └──▶ failed           (attempts exhausted)
+ *
+ * `executing` is the in-flight state a CAS claim flips to (see
+ * `CandidateStore.claim`) — it exists so exactly one executor can own a
+ * candidate at a time. `failed` is terminal: the tool was attempted the
+ * allowed number of times and never succeeded.
+ */
 export type CandidateStatus =
   | "pending_review"
   | "approved"
   | "rejected"
   | "revised"
-  | "executed";
+  | "executing"
+  | "executed"
+  | "failed";
 
 /** One button the review UI can render for a candidate. */
 export interface CandidateAction {
@@ -64,6 +80,14 @@ export interface Candidate {
   revisedPayload?: Record<string, unknown>;
   /** Free-text reviewer feedback (feeds learning loops). */
   feedback?: string;
+  /** Status the candidate held when it was claimed for execution — so a failed
+   *  attempt can hand it back exactly as the human left it (`approved` vs
+   *  `revised`, which decides which payload runs next time). Set by `claim`. */
+  claimedFrom?: "approved" | "revised";
+  /** How many times this candidate has been claimed for execution. Bounds
+   *  retries: once it reaches the attempt limit a failure is terminal instead
+   *  of returning to the queue forever. Set by `claim`. */
+  executionAttempts?: number;
 }
 
 /** A human decision applied to a pending candidate. */
@@ -85,6 +109,33 @@ export interface CandidateStore {
   resolve(id: string, resolution: CandidateResolution): Promise<Candidate | undefined>;
   /** All candidates still awaiting review, optionally filtered by kind. */
   listPending(kind?: string): Promise<Candidate[]>;
+  /**
+   * **Compare-and-set claim.** Atomically flip `approved | revised` → the
+   * in-flight `executing` status and return the claimed candidate — but only to
+   * the caller that won. Every other caller (including a concurrent one, a
+   * duplicate dashboard click, or a retried control-plane delivery) gets
+   * `null`, and must NOT run the tool.
+   *
+   * This is what makes `executeApproved` safe: reading the status and then
+   * executing is check-then-act, and two approvals of the same payment or send
+   * both pass the check and both fire. The store is the only place that can
+   * make the decision atomic, so the transition lives here.
+   *
+   * Implementations must:
+   *   - return `null` for unknown ids and for any status other than
+   *     `approved` / `revised`;
+   *   - perform the read-and-write as one indivisible operation (a single
+   *     conditional UPDATE / CAS / transaction — not read-then-write across an
+   *     `await`);
+   *   - record `claimedFrom` (the pre-claim status) and increment
+   *     `executionAttempts` on the returned candidate.
+   *
+   * **Optional for backward compatibility.** Stores written before this method
+   * existed keep type-checking and working; `executeApproved` detects the
+   * absence and falls back to the old check-then-act read, which is racy. A
+   * store that guards real-world side effects should implement it.
+   */
+  claim?(id: string): Promise<Candidate | null>;
 }
 
 // ─── In-memory store ─────────────────────────────────────────────────────────
@@ -122,6 +173,23 @@ export class InMemoryCandidateStore implements CandidateStore {
     return [...this.candidates.values()].filter(
       (c) => c.status === "pending_review" && (kind === undefined || c.kind === kind),
     );
+  }
+
+  /** CAS claim. The read-modify-write below runs to completion with no `await`
+   *  in it, so on JS's single-threaded event loop it is atomic against any
+   *  other claim — two concurrent `executeApproved` calls cannot both win. */
+  async claim(id: string): Promise<Candidate | null> {
+    const existing = this.candidates.get(id);
+    if (!existing) return null;
+    if (existing.status !== "approved" && existing.status !== "revised") return null;
+    const claimed: Candidate = {
+      ...existing,
+      status: "executing",
+      claimedFrom: existing.status,
+      executionAttempts: (existing.executionAttempts ?? 0) + 1,
+    };
+    this.candidates.set(id, claimed);
+    return claimed;
   }
 }
 
@@ -234,12 +302,41 @@ export function wrapToolAsCandidate(
   };
 }
 
+/** How many times a candidate may be claimed for execution before a failure is
+ *  treated as terminal (`failed`) instead of returning it to the queue. Bounds
+ *  the retryable-failure loop: a permanently broken tool cannot be re-approved
+ *  and re-run forever. */
+export const DEFAULT_CANDIDATE_MAX_ATTEMPTS = 3;
+
+export interface ExecuteApprovedLimits {
+  /** Override `DEFAULT_CANDIDATE_MAX_ATTEMPTS`. Values < 1 are treated as 1. */
+  maxAttempts?: number;
+}
+
 /**
  * Execute a human-approved candidate through the real `ToolRegistry`, using
  * `effectivePayload()` so a reviewer's revision — not the model's original
  * draft — is what runs. Accepts candidates in status `approved` or `revised`
  * (a revision is an edit-then-approve in one step); anything else is refused.
- * On success the candidate is marked `executed`.
+ *
+ * **Exactly-once, by claim.** Reading the status and then executing is
+ * check-then-act: two concurrent approvals of the same id both pass the read
+ * and both send the email / move the money. So the tool only runs if this call
+ * WINS `store.claim(id)` — an atomic `approved|revised → executing` flip. The
+ * loser runs nothing and comes back `{ success: false, denied: true }` saying
+ * the candidate is already executing or executed.
+ *
+ * **Failure is retryable, but bounded.** A claimed candidate whose tool fails
+ * is handed back in exactly the status the human left it (`approved` or
+ * `revised`), so a transient failure can be re-run without a second review —
+ * up to `maxAttempts` claims (default `DEFAULT_CANDIDATE_MAX_ATTEMPTS`). The
+ * attempt that exhausts the budget lands the candidate in the terminal
+ * `failed` state instead, so a permanently broken tool stops cycling.
+ *
+ * **Stores without `claim`** (the method is optional for backward
+ * compatibility) fall back to the old check-then-act path: the tool still runs,
+ * but concurrent execution is NOT prevented. Implement `claim` in any store
+ * fronting real-world side effects.
  *
  * Never throws — every failure path returns `{ success: false }`, matching
  * the registry's own contract.
@@ -250,6 +347,7 @@ export async function executeApproved(
   candidateId: string,
   context: ToolContext,
   opts?: ToolExecuteOptions,
+  limits?: ExecuteApprovedLimits,
 ): Promise<ToolResult> {
   let candidate: Candidate | undefined;
   try {
@@ -269,6 +367,26 @@ export async function executeApproved(
     };
   }
 
+  // Compare-and-set: only the winner of the claim may touch the outside world.
+  const canClaim = typeof store.claim === "function";
+  if (canClaim) {
+    let claimed: Candidate | null;
+    try {
+      claimed = await store.claim!(candidateId);
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { success: false, error: `candidate claim failed: ${message}` };
+    }
+    if (!claimed) {
+      return {
+        success: false,
+        denied: true,
+        error: `candidate ${candidateId} is already executing or executed — refusing to run it twice`,
+      };
+    }
+    candidate = claimed;
+  }
+
   const result = await registry.execute(
     candidate.kind,
     effectivePayload(candidate) as Record<string, any>,
@@ -282,6 +400,23 @@ export async function executeApproved(
     } catch {
       // Non-fatal: the action ran; a status-update failure must not turn a
       // successful execution into a reported failure (and risk a retry/dup).
+    }
+    return result;
+  }
+
+  // Failed: release the claim so the candidate is retryable — unless it has
+  // burned its attempt budget, in which case it goes terminal.
+  if (canClaim) {
+    const maxAttempts = Math.max(1, limits?.maxAttempts ?? DEFAULT_CANDIDATE_MAX_ATTEMPTS);
+    const attempts = candidate.executionAttempts ?? 1;
+    const status: CandidateResolution["status"] =
+      attempts >= maxAttempts ? "failed" : (candidate.claimedFrom ?? "approved");
+    try {
+      await store.resolve(candidateId, { status });
+    } catch {
+      // Non-fatal: the release is best-effort. A stuck "executing" candidate is
+      // visible in the queue and safe (it refuses to run again), whereas
+      // throwing here would lose the tool's own error.
     }
   }
   return result;

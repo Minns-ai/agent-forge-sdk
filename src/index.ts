@@ -401,6 +401,7 @@ export {
   effectivePayload,
   wrapToolAsCandidate,
   executeApproved,
+  DEFAULT_CANDIDATE_MAX_ATTEMPTS,
 } from "./patterns/candidate.js";
 export type {
   Candidate,
@@ -409,6 +410,7 @@ export type {
   CandidateResolution,
   CandidateStore,
   SubmitCandidateInput,
+  ExecuteApprovedLimits,
 } from "./patterns/candidate.js";
 export { Verifier } from "./patterns/verifier.js";
 export type {

@@ -5,10 +5,11 @@ import {
   effectivePayload,
   wrapToolAsCandidate,
   executeApproved,
+  DEFAULT_CANDIDATE_MAX_ATTEMPTS,
   buildTool,
   ToolRegistry,
 } from "../../src/index.js";
-import type { ToolContext, ToolDefinition } from "../../src/index.js";
+import type { ToolContext, ToolDefinition, CandidateStore } from "../../src/index.js";
 
 const ctx = {} as ToolContext;
 
@@ -206,5 +207,217 @@ describe("executeApproved through a real ToolRegistry", () => {
     const res = await executeApproved(store, registry, c.id, ctx);
     expect(res.success).toBe(false);
     expect((await store.get(c.id))?.status).toBe("approved");
+  });
+});
+
+// A candidate is a real-world side effect waiting to happen: a payment, a send.
+// Reading the status and THEN executing is check-then-act — two approvals of
+// the same id both pass the read and both fire. executeApproved must run the
+// tool exactly once per candidate, no matter how many callers race.
+describe("executeApproved concurrency (CAS claim)", () => {
+  function setup(behaviour: "ok" | "fail" = "ok") {
+    const store = new InMemoryCandidateStore();
+    const registry = new ToolRegistry();
+    const calls: Array<Record<string, unknown>> = [];
+    registry.register(
+      buildTool({
+        name: "charge_card",
+        description: "Charges a card",
+        parameters: { amount: { type: "number", description: "cents" } },
+        effect: "destructive",
+        execute: async (params) => {
+          calls.push({ ...params });
+          // Yield, so a racing caller gets a turn mid-execution — exactly the
+          // window a check-then-act implementation loses money in.
+          await new Promise((r) => setTimeout(r, 5));
+          return behaviour === "ok"
+            ? { success: true, result: { charged: params.amount } }
+            : { success: false, error: "card declined" };
+        },
+      }),
+    );
+    return { store, registry, calls };
+  }
+
+  const approved = async (store: InMemoryCandidateStore) => {
+    const c = await submitCandidate(store, {
+      kind: "charge_card",
+      payload: { amount: 5000 },
+      confidence: 0.9,
+      reason: "invoice 12",
+    });
+    await store.resolve(c.id, { status: "approved" });
+    return c;
+  };
+
+  it("two concurrent executions charge the card exactly ONCE", async () => {
+    const { store, registry, calls } = setup();
+    const c = await approved(store);
+
+    const [a, b] = await Promise.all([
+      executeApproved(store, registry, c.id, ctx),
+      executeApproved(store, registry, c.id, ctx),
+    ]);
+
+    expect(calls).toEqual([{ amount: 5000 }]); // the whole point
+    const winners = [a, b].filter((r) => r.success);
+    const losers = [a, b].filter((r) => !r.success);
+    expect(winners.length).toBe(1);
+    expect(losers.length).toBe(1);
+    expect(losers[0].denied).toBe(true);
+    expect(losers[0].error).toContain("already executing or executed");
+    expect((await store.get(c.id))?.status).toBe("executed");
+  });
+
+  it("the loser of a race reports it did not run, and never runs later", async () => {
+    const { store, registry, calls } = setup();
+    const c = await approved(store);
+
+    const first = executeApproved(store, registry, c.id, ctx);
+    // Second caller arrives while the first is mid-charge.
+    const second = await executeApproved(store, registry, c.id, ctx);
+    expect(second.success).toBe(false);
+    expect(second.denied).toBe(true);
+    expect(calls).toEqual([{ amount: 5000 }]);
+
+    expect((await first).success).toBe(true);
+    // A late duplicate (dashboard double-click after completion) is refused too.
+    const third = await executeApproved(store, registry, c.id, ctx);
+    expect(third.success).toBe(false);
+    expect(third.denied).toBe(true);
+    expect(calls).toEqual([{ amount: 5000 }]);
+  });
+
+  it("ten simultaneous approvals still execute once", async () => {
+    const { store, registry, calls } = setup();
+    const c = await approved(store);
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => executeApproved(store, registry, c.id, ctx)),
+    );
+    expect(calls.length).toBe(1);
+    expect(results.filter((r) => r.success).length).toBe(1);
+  });
+
+  it("claim is atomic: only one caller wins, and it records attempt provenance", async () => {
+    const store = new InMemoryCandidateStore();
+    const c = await approved(store);
+
+    const claims = await Promise.all([store.claim(c.id), store.claim(c.id), store.claim(c.id)]);
+    const won = claims.filter((x): x is NonNullable<typeof x> => x !== null);
+    expect(won.length).toBe(1);
+    expect(won[0].status).toBe("executing");
+    expect(won[0].claimedFrom).toBe("approved");
+    expect(won[0].executionAttempts).toBe(1);
+    // pending/rejected/executed candidates are never claimable
+    const pending = await submitCandidate(store, { kind: "k", payload: {}, confidence: 0.5, reason: "r" });
+    expect(await store.claim(pending.id)).toBeNull();
+    expect(await store.claim("no-such-id")).toBeNull();
+  });
+
+  it("a FAILED execution returns the candidate to approved (retryable), attempt counted", async () => {
+    const { store, registry, calls } = setup("fail");
+    const c = await approved(store);
+
+    const res = await executeApproved(store, registry, c.id, ctx);
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("declined");
+    const after = await store.get(c.id);
+    expect(after?.status).toBe("approved"); // back in the human's hands, re-runnable
+    expect(after?.executionAttempts).toBe(1);
+    expect(calls.length).toBe(1);
+
+    // Retrying is allowed — it is the same approval, not a new one.
+    await executeApproved(store, registry, c.id, ctx);
+    expect((await store.get(c.id))?.executionAttempts).toBe(2);
+    expect(calls.length).toBe(2);
+  });
+
+  it("a failed REVISED candidate returns to revised, so the human's edit still wins on retry", async () => {
+    const { store, registry, calls } = setup("fail");
+    const c = await submitCandidate(store, {
+      kind: "charge_card",
+      payload: { amount: 5000 },
+      confidence: 0.9,
+      reason: "r",
+    });
+    await store.resolve(c.id, { status: "revised", revisedPayload: { amount: 4200 } });
+
+    await executeApproved(store, registry, c.id, ctx);
+    const after = await store.get(c.id);
+    expect(after?.status).toBe("revised");
+    expect(calls).toEqual([{ amount: 4200 }]);
+
+    await executeApproved(store, registry, c.id, ctx);
+    expect(calls).toEqual([{ amount: 4200 }, { amount: 4200 }]); // still the revision
+  });
+
+  it("repeated failure goes terminal at the attempt limit (no infinite retry)", async () => {
+    const { store, registry, calls } = setup("fail");
+    const c = await approved(store);
+
+    await executeApproved(store, registry, c.id, ctx, undefined, { maxAttempts: 2 });
+    expect((await store.get(c.id))?.status).toBe("approved");
+
+    const last = await executeApproved(store, registry, c.id, ctx, undefined, { maxAttempts: 2 });
+    expect(last.success).toBe(false);
+    expect((await store.get(c.id))?.status).toBe("failed"); // terminal
+
+    // A terminal candidate is refused outright — the tool is not touched again.
+    const refused = await executeApproved(store, registry, c.id, ctx, undefined, { maxAttempts: 2 });
+    expect(refused.success).toBe(false);
+    expect(refused.denied).toBe(true);
+    expect(refused.error).toContain('"failed"');
+    expect(calls.length).toBe(2);
+  });
+
+  it("default attempt limit is DEFAULT_CANDIDATE_MAX_ATTEMPTS", async () => {
+    const { store, registry, calls } = setup("fail");
+    const c = await approved(store);
+    for (let i = 0; i < DEFAULT_CANDIDATE_MAX_ATTEMPTS + 2; i += 1) {
+      await executeApproved(store, registry, c.id, ctx);
+    }
+    expect(calls.length).toBe(DEFAULT_CANDIDATE_MAX_ATTEMPTS);
+    expect((await store.get(c.id))?.status).toBe("failed");
+  });
+
+  it("a store without claim() still works (documented racy fallback)", async () => {
+    // Backward compatibility: `claim` is optional, so pre-existing custom
+    // stores keep type-checking and executing. They just don't get the guard.
+    const { registry, calls } = setup();
+    const inner = new InMemoryCandidateStore();
+    const legacy: CandidateStore = {
+      submit: (c) => inner.submit(c),
+      get: (id) => inner.get(id),
+      resolve: (id, r) => inner.resolve(id, r),
+      listPending: (k) => inner.listPending(k),
+    };
+    expect(legacy.claim).toBeUndefined();
+
+    const c = await approved(inner);
+    const res = await executeApproved(legacy, registry, c.id, ctx);
+    expect(res.success).toBe(true);
+    expect(calls).toEqual([{ amount: 5000 }]);
+    expect((await legacy.get(c.id))?.status).toBe("executed");
+  });
+
+  it("a claim() that throws fails closed — the tool does not run", async () => {
+    const { registry, calls } = setup();
+    const inner = new InMemoryCandidateStore();
+    const c = await approved(inner);
+    const flaky: CandidateStore = {
+      submit: (x) => inner.submit(x),
+      get: (id) => inner.get(id),
+      resolve: (id, r) => inner.resolve(id, r),
+      listPending: (k) => inner.listPending(k),
+      claim: async () => {
+        throw new Error("store down");
+      },
+    };
+
+    const res = await executeApproved(flaky, registry, c.id, ctx);
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("store down");
+    expect(calls).toEqual([]);
   });
 });

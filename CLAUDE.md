@@ -85,6 +85,7 @@ src/
     approval.ts         — createHttpApprovalHandler: HITL → control-plane approval queue
     durable.ts          — createGraphStepHandler: maps invoke/checkpoint/interrupt → step contract
     serve.ts            — serveAgent(): HTTP harness exposing /v1/invoke + /healthz
+                          (+ /v1/execute-candidate when onExecuteCandidate is supplied)
 
   utils/
     timer.ts            — PipelineTimer: phase timing
@@ -108,6 +109,13 @@ split into two decoupled tiers:
   one `graph.invoke()`, an interrupt at an approval node → `needs_approval`, and a
   resume call continues from the checkpoint. The control plane's Temporal worker
   drives this in a multi-step loop, pausing on the `approval` signal.
+- **HITL propose-don't-execute** — `serveAgent({ handler, onExecuteCandidate })`
+  also serves `POST /v1/execute-candidate` (`ExecuteCandidateRequest/Response` in
+  `contract.ts`): a gated tool proposes instead of running, a human approves in
+  the dashboard, and the control plane calls this route so the ORIGINAL tool
+  runs. Omit the handler and the route 404s ("this agent has no candidates").
+  serveAgent authenticates no inbound route — the deployment's token proxy
+  fronts them all with one credential.
 
 ## Build & Dev Commands
 
