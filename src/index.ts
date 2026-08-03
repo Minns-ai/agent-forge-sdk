@@ -37,7 +37,9 @@ export type {
   LLMMessage,
   LLMCompletionOptions,
   LLMStreamChunk,
+  LLMStreamEvent,
   LLMToolSpec,
+  ToolSpecSchema,
   LLMToolCall,
   LLMToolResponse,
   SessionStore,
@@ -54,6 +56,7 @@ export type {
   GoalChecker,
   ReasoningConfig,
   AgentForgeConfig,
+  RunControls,
   RunOptions,
   IntentState,
 } from "./types.js";
@@ -195,6 +198,9 @@ export type { ExecutionTier } from "./pipeline/adaptive-runner.js";
 /** @deprecated Use AdaptiveRunner instead */
 export { PipelineRunner } from "./pipeline/runner.js";
 
+export { validateToolArgs } from "./tools/schema-validator.js";
+export type { ArgValidationResult } from "./tools/schema-validator.js";
+
 // ─── Utils ───────────────────────────────────────────────────────────────────
 export { PipelineTimer } from "./utils/timer.js";
 export { computeContextFingerprint } from "./utils/fingerprint.js";
@@ -252,7 +258,7 @@ export type { AsyncTask, AsyncSubAgentConfig } from "./middleware/builtin/async-
 export { MinnsFullPowerMiddleware } from "./middleware/builtin/minns-power.js";
 export type { MinnsFullClient, MinnsFullPowerConfig } from "./middleware/builtin/minns-power.js";
 export { VibeGraphMiddleware, compileVibeGraph, buildAgentGraph } from "./middleware/builtin/vibe-graph.js";
-export type { VibeGraphConfig, VibeGraphIR, VibeGraphNode, VibeGraphEdge, VibeGraphState } from "./middleware/builtin/vibe-graph.js";
+export type { VibeGraphConfig, VibeGraphIR, VibeGraphNode, VibeGraphEdge, VibeGraphState, BuildAgentGraphOptions } from "./middleware/builtin/vibe-graph.js";
 export { MultiAgentMiddleware } from "./middleware/builtin/multi-agent.js";
 export type { MultiAgentClient, MultiAgentConfig } from "./middleware/builtin/multi-agent.js";
 export { HumanInTheLoopMiddleware } from "./middleware/builtin/human-in-the-loop.js";
@@ -366,7 +372,12 @@ export type {
   SubAgentTask,
 } from "./subagent/types.js";
 
-// ─── Pipeline Phases (advanced usage) ────────────────────────────────────────
+// ─── Legacy pipeline phases ──────────────────────────────────────────────────
+// These phases are used ONLY by the deprecated PipelineRunner and the graph
+// pipeline preset — AgentForge's default AdaptiveRunner path does not call
+// them. They remain exported for backward compatibility and for custom
+// pipelines, but new code should not build on them.
+/** @deprecated Legacy phase — not used by the default AdaptiveRunner path. */
 export { runIntentPhase, applyIntentUpdate, createDefaultIntentState } from "./pipeline/phases/intent-phase.js";
 export type { IntentStateUpdate } from "./pipeline/phases/intent-phase.js";
 export { runSemanticWritePhase } from "./pipeline/phases/semantic-write-phase.js";
@@ -378,3 +389,55 @@ export { runReasoningPhase } from "./pipeline/phases/reasoning-phase.js";
 export { defaultGoalChecker, handleGoalCompletion } from "./pipeline/phases/goal-check-phase.js";
 export { runResponsePhase } from "./pipeline/phases/response-phase.js";
 export { runFinalizePhase } from "./pipeline/phases/finalize-phase.js";
+
+// ─── Production Patterns ─────────────────────────────────────────────────────
+// Primitives distilled from production agent systems: HITL propose-don't-
+// execute, LLM-as-judge verification, pre-model safety gating, light/medium/
+// heavy model tiering, and conservative learning guardrails.
+export {
+  InMemoryCandidateStore,
+  defaultCandidateActions,
+  submitCandidate,
+  effectivePayload,
+  wrapToolAsCandidate,
+  executeApproved,
+} from "./patterns/candidate.js";
+export type {
+  Candidate,
+  CandidateStatus,
+  CandidateAction,
+  CandidateResolution,
+  CandidateStore,
+  SubmitCandidateInput,
+} from "./patterns/candidate.js";
+export { Verifier } from "./patterns/verifier.js";
+export type {
+  VerifierOptions,
+  VerifyInput,
+  VerifyOutcome,
+  VerifiedToolStep,
+} from "./patterns/verifier.js";
+export { SafetyGate, assertAllowed } from "./patterns/safety-gate.js";
+export type {
+  SafetyGateOptions,
+  SafetyCheckResult,
+  SafetyLocale,
+} from "./patterns/safety-gate.js";
+export { ModelRouter } from "./patterns/model-router.js";
+export type { ModelTier, ModelTiers } from "./patterns/model-router.js";
+export { LearningLoop } from "./patterns/learning-loop.js";
+export type {
+  LearningLoopConfig,
+  LearningOutcome,
+  RecordOutcomeInput,
+} from "./patterns/learning-loop.js";
+
+// ─── Multimodal content blocks (PDF / vision) ───────────────────────────────
+export type { ContentBlock } from "./types.js";
+export {
+  contentToText,
+  textBlock,
+  imageBlock,
+  documentBlock,
+  pdfFromBase64,
+} from "./llm/content.js";

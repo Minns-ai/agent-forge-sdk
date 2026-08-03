@@ -2,6 +2,11 @@ import type { LLMProvider, LLMMessage, SessionState, GoalProgress, Directive } f
 import type { CritiqueResult } from "./types.js";
 import { safeJsonParse } from "../utils/json.js";
 
+/** Escape regex metacharacters so user-supplied strings can be embedded in patterns. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Self-Critique — evaluates the generated response before sending it.
  *
@@ -99,12 +104,12 @@ ${heuristicIssues.length > 0 ? `\nHeuristic issues found: ${heuristicIssues.join
    */
   private heuristicCheck(response: string, facts: Record<string, any>, claims: any[]): string[] {
     const issues: string[] = [];
-    const responseLower = response.toLowerCase();
 
     // Check if response re-asks for known facts
     for (const [key, value] of Object.entries(facts)) {
-      // Look for question patterns about known facts
-      const keyPattern = key.replace(/[_-]/g, "\\s*");
+      // Look for question patterns about known facts. Keys come from user data
+      // and may contain regex metacharacters (e.g. "price(usd)", "file.pdf").
+      const keyPattern = escapeRegExp(key).replace(/[_-]/g, "\\s*");
       const askPattern = new RegExp(`what.*${keyPattern}|${keyPattern}.*\\?|prefer.*${keyPattern}`, "i");
       if (askPattern.test(response)) {
         issues.push(`Re-asks for "${key}" which is already known: "${value}"`);
@@ -117,7 +122,7 @@ ${heuristicIssues.length > 0 ? `\nHeuristic issues found: ${heuristicIssues.join
       const obj = claim?.object ?? "";
       if (predicate && obj) {
         const stripped = predicate.replace(/^(prefers|likes|wants|has|is)\s+/i, "").trim();
-        const askPattern = new RegExp(`what.*${stripped}|${stripped}.*\\?`, "i");
+        const askPattern = new RegExp(`what.*${escapeRegExp(stripped)}|${escapeRegExp(stripped)}.*\\?`, "i");
         if (askPattern.test(response)) {
           issues.push(`Re-asks about "${stripped}" which is claimed as "${obj}"`);
         }

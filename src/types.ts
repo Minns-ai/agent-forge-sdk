@@ -18,6 +18,22 @@ export interface ToolParameterSchema {
   description: string;
   optional?: boolean;
   enum?: string[];
+  /** Element schema for `type: "array"` parameters. Without it, providers with
+   *  strict validation (e.g. OpenAI strict mode) reject the tool spec. */
+  items?: ToolParameterSchema;
+  /** Nested field schemas for `type: "object"` parameters. */
+  properties?: Record<string, ToolParameterSchema>;
+  /** Required keys of a nested object (top-level required-ness comes from the
+   *  absence of `optional` instead). */
+  required?: string[];
+  /** Numeric bounds (type: "number" | "integer"). */
+  minimum?: number;
+  maximum?: number;
+  /** String length bounds. */
+  minLength?: number;
+  maxLength?: number;
+  /** Regex the string value must match (RE2-ish subset; used verbatim). */
+  pattern?: string;
 }
 
 /** What a tool does to the world. Drives concurrency and approval defaults:
@@ -79,6 +95,11 @@ export interface ToolDefinition {
   /** Cap on serialized result size in bytes; larger results are truncated to a
    *  preview with a note. Absent ⇒ the registry default (off unless set). */
   maxResultBytes?: number;
+  /** Wall-clock cap for one execute() call in milliseconds. On expiry the
+   *  registry returns a failed result and the loop moves on — a hanging tool
+   *  no longer hangs the whole agent. Absent ⇒ the registry default (60s);
+   *  0 disables the cap for this tool. */
+  timeoutMs?: number;
   /** Free-form tags for grouping and disclosure search. */
   tags?: string[];
   /** Which host tier runs this tool. Informational — lets the platform route
@@ -148,13 +169,49 @@ export interface ToolContext {
   client: any; // EventGraphDBClient from minns-sdk
   sessionState: SessionState;
   services: Record<string, any>;
+  /** Fires when the run is aborted or the tool's timeout expires. Long-running
+   *  tools should observe it (pass to fetch, poll it in loops) so cancellation
+   *  actually interrupts work instead of only being noticed at the boundary. */
+  signal?: AbortSignal;
 }
 
 // ─── LLM ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Multimodal content block — the unit of a rich (non-string) message content.
+ *
+ * - `text` — plain text.
+ * - `image` — base64 or URL image (vision-capable providers).
+ * - `document` — native document input (Anthropic PDFs: base64 up to 32MB /
+ *   600 pages, URL, or a Files-API `file` reference; `citations` enables page
+ *   citations; `title` names the document in prompts and citations).
+ */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      source:
+        | { type: "base64"; mediaType: string; data: string }
+        | { type: "url"; url: string };
+    }
+  | {
+      type: "document";
+      source:
+        | { type: "base64"; mediaType: "application/pdf"; data: string }
+        | { type: "url"; url: string }
+        | { type: "file"; fileId: string };
+      citations?: { enabled: boolean };
+      title?: string;
+    };
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  /** Plain text, or an array of multimodal content blocks (text/image/document).
+   *  String content is serialized exactly as before; block arrays are mapped to
+   *  each provider's native format (Anthropic) or degraded gracefully (OpenAI
+   *  has no document equivalent). System and tool messages stay string-typed in
+   *  practice. */
+  content: string | ContentBlock[];
   /** Tool call ID — required when role is "tool" (tool result message) */
   toolCallId?: string;
   /** Tool calls made by the assistant — present in assistant messages */
@@ -184,6 +241,22 @@ export interface LLMStreamChunk {
  * Distinct from ToolDefinition — this describes the tool schema for the LLM,
  * not the execution function.
  */
+/** JSON-Schema subset carried on tool specs (recursive: arrays via `items`,
+ *  objects via `properties`). Extra keys pass through untouched. */
+export interface ToolSpecSchema {
+  type: string;
+  description?: string;
+  enum?: string[];
+  items?: ToolSpecSchema;
+  properties?: Record<string, ToolSpecSchema>;
+  required?: string[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+}
+
 export interface LLMToolSpec {
   /** Tool name (must match a registered ToolDefinition.name) */
   name: string;
@@ -192,11 +265,7 @@ export interface LLMToolSpec {
   /** JSON Schema for the tool's parameters */
   parameters: {
     type: "object";
-    properties: Record<string, {
-      type: string;
-      description?: string;
-      enum?: string[];
-    }>;
+    properties: Record<string, ToolSpecSchema>;
     required?: string[];
   };
 }
@@ -227,6 +296,18 @@ export interface LLMToolResponse {
   usage?: import("./llm/usage.js").TokenUsage;
 }
 
+/**
+ * Events yielded by a streaming tool-calling completion.
+ *
+ * A well-behaved stream yields zero or more `text_delta` events followed by
+ * exactly one `done` event carrying the complete, normalized LLMToolResponse
+ * (including any tool calls, the stop reason, and usage). Consumers that only
+ * want the final response can ignore deltas and read `done`.
+ */
+export type LLMStreamEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "done"; response: LLMToolResponse };
+
 export interface LLMProvider {
   /** Non-streaming completion — returns raw text */
   complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<string>;
@@ -245,6 +326,21 @@ export interface LLMProvider {
     tools: LLMToolSpec[],
     options?: LLMCompletionOptions,
   ): Promise<LLMToolResponse>;
+
+  /**
+   * Streaming native tool calling — yields `text_delta` events as the model
+   * produces text, then exactly one `done` event with the complete normalized
+   * LLMToolResponse (tool calls, stop reason, usage).
+   *
+   * Optional. When present, the agentic loop uses it so the final answer
+   * streams token-by-token (time-to-first-token stops being total run time).
+   * When absent, the loop falls back to completeWithTools.
+   */
+  streamWithTools?(
+    messages: LLMMessage[],
+    tools: LLMToolSpec[],
+    options?: LLMCompletionOptions,
+  ): AsyncGenerator<LLMStreamEvent>;
 }
 
 // ─── Intent State ─────────────────────────────────────────────────────────────
@@ -404,7 +500,13 @@ export interface ReasoningConfig {
   reflexion?: boolean;
   /** Enable self-critique gate before response (default false) */
   selfCritique?: boolean;
-  /** Enable world model simulation before executing actions (default false — costs extra LLM calls) */
+  /**
+   * @deprecated This flag is not wired to anything — setting it has no effect.
+   * World-model simulation currently runs only inside tree search (enable
+   * `treeSearch` instead). The flag is kept so existing configs still compile;
+   * it will either be wired to a standalone pre-execution simulation gate or
+   * removed in a future minor release.
+   */
   worldModel?: boolean;
 }
 
@@ -465,9 +567,26 @@ export interface AgentForgeConfig {
   onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
 }
 
-export interface RunOptions {
+/** Per-run governance rails for the agent loop. */
+export interface RunControls {
+  /** Abort the run between steps / tool batches (stopReason: "aborted"). */
+  signal?: AbortSignal;
+  /** Hard cap on total tool executions this run (stopReason: "max_tool_calls"). */
+  maxToolCalls?: number;
+  /** Hard cap on accumulated LLM cost in USD, enforced when the provider
+   *  reports usage (stopReason: "max_budget"). */
+  maxBudgetUsd?: number;
+}
+
+export interface RunOptions extends RunControls {
   sessionId: number;
   userId?: string;
+  /** Multimodal attachments (images / PDF documents) for this turn. When
+   *  present, the user turn is built as `[{type:"text",text:message},
+   *  ...attachments]` and sent to the provider as content blocks. Conversation
+   *  history stays text-based: only the text `message` is persisted, so
+   *  attachments apply to the current turn only. */
+  attachments?: ContentBlock[];
 }
 
 export type EventHandler = (event: AgentEvent) => void;

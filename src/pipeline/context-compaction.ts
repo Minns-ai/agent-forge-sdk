@@ -24,12 +24,36 @@ export interface CompactionOptions {
 
 const CHARS_PER_TOKEN = 4;
 
-const contentLength = (m: LLMMessage): number =>
-  typeof m.content === "string" ? m.content.length : JSON.stringify(m.content ?? "").length;
+/** Fixed per-block token overhead for non-text content blocks (framing,
+ *  source metadata, provider-side wrapping). */
+const BLOCK_OVERHEAD_TOKENS = 64;
 
-/** Rough token estimate for a message list (chars/4). */
+/** Rough token estimate for one message's content. String content is chars/4.
+ *  ContentBlock[] content is estimated per block — text blocks by chars/4,
+ *  base64 image/document payloads by data.length/4 plus a fixed per-block
+ *  overhead (url/file sources are just the overhead). Blocks are never split
+ *  by compaction; this only sizes them. */
+const contentTokens = (content: LLMMessage["content"]): number => {
+  if (typeof content === "string") return content.length / CHARS_PER_TOKEN;
+  if (!Array.isArray(content)) return JSON.stringify(content ?? "").length / CHARS_PER_TOKEN;
+  let tokens = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text") {
+      tokens += (block.text?.length ?? 0) / CHARS_PER_TOKEN;
+    } else {
+      tokens += BLOCK_OVERHEAD_TOKENS;
+      if (block.source?.type === "base64") {
+        tokens += (block.source.data?.length ?? 0) / CHARS_PER_TOKEN;
+      }
+    }
+  }
+  return tokens;
+};
+
+/** Rough token estimate for a message list (chars/4; block-aware). */
 export function estimateTokens(messages: LLMMessage[]): number {
-  return Math.round(messages.reduce((n, m) => n + contentLength(m), 0) / CHARS_PER_TOKEN);
+  return Math.round(messages.reduce((n, m) => n + contentTokens(m.content), 0));
 }
 
 export interface MicroCompactOptions {

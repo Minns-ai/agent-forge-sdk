@@ -172,7 +172,9 @@ export class ToolResultEvictionMiddleware implements Middleware {
     const messages = request.messages.map((msg) => {
       if (msg.role !== "tool" && msg.role !== "assistant") return msg;
 
-      // Check tool result messages
+      // Check tool result messages. Multimodal block messages are never
+      // evicted/split — eviction is text-only.
+      if (typeof msg.content !== "string") return msg;
       if (msg.content.length <= this.maxResultLength) return msg;
 
       // Evict this result

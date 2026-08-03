@@ -15,6 +15,9 @@ import type {
   PipelineResult,
   AgentEvent,
   ReasoningConfig,
+  RunControls,
+  StopReason,
+  ContentBlock,
 } from "../types.js";
 import type { SubAgentDefinition } from "../subagent/types.js";
 import type {
@@ -114,16 +117,32 @@ function buildAdaptiveSystemPrompt(params: {
   parts.push(directive.identity);
   parts.push(`\nYour goal: ${directive.goalDescription}`);
 
-  // Behavior rules
+  // Behavior rules — promoted from the battle-tested native-tool prompt
+  // (previously dead code on this default path): explicit work loop with a
+  // verify step, error-recovery guidance, and anti-preamble rules.
   parts.push(`
-## Behavior
+## Core Behavior
 
-- Be concise and direct. Don't over-explain.
+- Be concise and direct. Don't over-explain unless asked.
+- NEVER add preamble ("Sure!", "Great question!", "I'll now..."). Just act.
 - If you can answer directly from context, do so without using tools.
-- For complex tasks, think through your approach before acting.
-- Use tools when you need external information or to take action.
-- When you have enough information to respond, respond immediately.
-- Never re-ask for information the user already provided.`);
+- If the request is ambiguous, ask questions before acting.
+- Keep working until the task is fully complete. Don't stop partway and explain what you would do — just do it.
+- Only yield back to the user when done or genuinely blocked.
+- Never re-ask for information the user already provided.
+
+## How to Work
+
+1. **Check what you know** — use the facts and memory below before reaching for tools.
+2. **Plan if complex** — think through multi-step tasks before acting.
+3. **Act** — use tools to accomplish the task. Independent read-only calls can be issued together.
+4. **Verify** — check your work against what was asked. Your first attempt is rarely correct — iterate.
+5. **Respond** — when done, give a concise summary of what you accomplished (or the answer itself).
+
+## When Things Go Wrong
+
+- If a tool fails repeatedly, stop and analyze WHY — don't retry the same call unchanged.
+- If you're blocked, say what's wrong and what you need — don't fabricate results.`);
 
   // Known facts
   const facts = sessionState.collectedFacts;
@@ -185,6 +204,30 @@ function buildAdaptiveSystemPrompt(params: {
 
 // ─── Tool Spec Builder ────────────────────────────────────────────────────────
 
+/** Convert a ToolParameterSchema (recursive) into the wire JSON-Schema shape,
+ *  preserving nested `items`/`properties` so array/object parameters emit
+ *  valid schemas instead of bare `type: "array"` stubs. */
+function toSpecSchema(schema: import("../types.js").ToolParameterSchema): import("../types.js").ToolSpecSchema {
+  const out: import("../types.js").ToolSpecSchema = {
+    type: schema.type,
+    ...(schema.description ? { description: schema.description } : {}),
+    ...(schema.enum ? { enum: schema.enum } : {}),
+    ...(schema.minimum !== undefined ? { minimum: schema.minimum } : {}),
+    ...(schema.maximum !== undefined ? { maximum: schema.maximum } : {}),
+    ...(schema.minLength !== undefined ? { minLength: schema.minLength } : {}),
+    ...(schema.maxLength !== undefined ? { maxLength: schema.maxLength } : {}),
+    ...(schema.pattern ? { pattern: schema.pattern } : {}),
+  };
+  if (schema.items) out.items = toSpecSchema(schema.items);
+  if (schema.properties) {
+    out.properties = Object.fromEntries(
+      Object.entries(schema.properties).map(([k, v]) => [k, toSpecSchema(v)]),
+    );
+    if (schema.required) out.required = schema.required;
+  }
+  return out;
+}
+
 function buildToolSpecs(registry: ToolRegistry): LLMToolSpec[] {
   return registry.definitions().map((tool: ToolDefinition) => ({
     name: tool.name,
@@ -192,14 +235,7 @@ function buildToolSpecs(registry: ToolRegistry): LLMToolSpec[] {
     parameters: {
       type: "object" as const,
       properties: Object.fromEntries(
-        Object.entries(tool.parameters).map(([name, schema]) => [
-          name,
-          {
-            type: schema.type,
-            description: schema.description,
-            ...(schema.enum ? { enum: schema.enum } : {}),
-          },
-        ]),
+        Object.entries(tool.parameters).map(([name, schema]) => [name, toSpecSchema(schema)]),
       ),
       required: Object.entries(tool.parameters)
         .filter(([, schema]) => !schema.optional)
@@ -423,6 +459,19 @@ export class AdaptiveRunner {
 
   /**
    * Run the adaptive pipeline for a message.
+   *
+   * `controls` are per-run governance rails (all optional):
+   * - `signal` — AbortSignal; a fired signal stops the loop between steps and
+   *   between tool batches with `stopReason: "aborted"`.
+   * - `maxToolCalls` — hard cap on total tool executions this run
+   *   (`stopReason: "max_tool_calls"` when hit).
+   * - `maxBudgetUsd` — hard cap on accumulated LLM cost, enforced when the
+   *   provider reports usage (`stopReason: "max_budget"` when hit).
+   *
+   * `attachments` are multimodal content blocks (images / PDF documents) for
+   * this turn. When present, the user turn is sent to the provider as
+   * `[{type:"text",text:message}, ...attachments]`. Conversation history stays
+   * text-based — only the text `message` is persisted.
    */
   async run(
     message: string,
@@ -430,6 +479,8 @@ export class AdaptiveRunner {
     sessionId: number,
     userId?: string,
     emitter?: AgentEventEmitter,
+    controls?: RunControls,
+    attachments?: ContentBlock[],
   ): Promise<PipelineResult> {
     const timer = new PipelineTimer();
     const errors: string[] = [];
@@ -441,6 +492,7 @@ export class AdaptiveRunner {
     // ── Build PipelineState ──────────────────────────────────────────────
     const pipelineState: PipelineState = {
       message,
+      ...(attachments?.length ? { attachments } : {}),
       sessionId,
       userId,
       intent: {
@@ -475,6 +527,9 @@ export class AdaptiveRunner {
         client: this.client,
         sessionState,
         services: this.services,
+        // The run's AbortSignal reaches every tool via context.signal so
+        // cancellation interrupts in-flight work, not just loop boundaries.
+        signal: controls?.signal,
       },
       middlewareState: {},
     };
@@ -502,6 +557,20 @@ export class AdaptiveRunner {
     if (!this.middlewareStack.isEmpty) {
       modelCallFn = this.middlewareStack.buildModelCall(
         this.llm,
+        pipelineState,
+        middlewareContext,
+      );
+    }
+
+    // Wire the middleware onion into the NATIVE TOOL LOOP as well. Without
+    // this, every wrapModelCall middleware (caching, summarization, eviction,
+    // truncation, patching) was inert on the default path — the loop called
+    // llm.completeWithTools directly.
+    let toolModelCallFn: NextFn | null = null;
+    if (!this.middlewareStack.isEmpty && this.llm.completeWithTools) {
+      toolModelCallFn = this.middlewareStack.buildToolModelCall(
+        this.llm,
+        buildToolSpecs(this.toolRegistry),
         pipelineState,
         middlewareContext,
       );
@@ -536,12 +605,12 @@ export class AdaptiveRunner {
     if (tier === "graph") {
       responseMessage = await this.runGraphPipeline(
         message, sessionState, sessionId, userId,
-        pipelineState, modelCallFn, timer, errors, allReasoning, allToolResults, emit,
+        pipelineState, toolModelCallFn, timer, errors, allReasoning, allToolResults, emit, controls,
       );
     } else {
       responseMessage = await this.runAgenticLoop(
         message, sessionState, sessionId, userId,
-        pipelineState, modelCallFn, timer, errors, allReasoning, allToolResults, emit,
+        pipelineState, toolModelCallFn, timer, errors, allReasoning, allToolResults, emit, controls,
       );
     }
 
@@ -611,7 +680,7 @@ export class AdaptiveRunner {
     emit({ type: "pipeline", data: pipelineSummary });
 
     const result: PipelineResult = {
-      success: true,
+      success: pipelineState.stopReason !== "error",
       message: responseMessage,
       intent: pipelineState.intent,
       memory: pipelineState.memory,
@@ -620,6 +689,8 @@ export class AdaptiveRunner {
       reasoning: allReasoning,
       pipeline: pipelineSummary,
       errors,
+      stopReason: pipelineState.stopReason ?? "done",
+      ...(pipelineState.usdCost !== undefined ? { usdCost: pipelineState.usdCost } : {}),
     };
 
     emit({ type: "done", data: result });
@@ -644,11 +715,49 @@ export class AdaptiveRunner {
   private async completeWithToolsRecovering(
     messages: LLMMessage[],
     toolSpecs: LLMToolSpec[],
+    via?: NextFn | null,
+    onDelta?: (delta: string) => void,
   ): Promise<{ response: LLMToolResponse; messages: LLMMessage[] }> {
     let current = messages;
     for (let attempt = 0; ; attempt++) {
       try {
-        const response = await this.llm.completeWithTools!(current, toolSpecs);
+        // Three call paths, in preference order:
+        // 1. streamWithTools when the provider supports it AND a delta consumer
+        //    is attached — the answer streams token-by-token (stream_chunk
+        //    events), so time-to-first-token stops being total run time. Note:
+        //    streamed calls bypass wrapModelCall middlewares (a stream cannot
+        //    flow through the request/response onion); system-prompt
+        //    modifications still apply because they act on `messages`.
+        // 2. The middleware onion (via) for non-streaming tool calls.
+        // 3. Direct provider call.
+        let response: LLMToolResponse;
+        if (onDelta && this.llm.streamWithTools) {
+          let final: LLMToolResponse | null = null;
+          for await (const ev of this.llm.streamWithTools(current, toolSpecs)) {
+            if (ev.type === "text_delta") {
+              if (ev.delta) onDelta(ev.delta);
+            } else if (ev.type === "done") {
+              final = ev.response;
+            }
+          }
+          if (!final) throw new Error("streamWithTools ended without a done event");
+          response = final;
+        } else if (via) {
+          const wrapped = await via({
+            messages: current,
+            tools: toolSpecs,
+            purpose: "action_decision",
+            metadata: {},
+          });
+          response = {
+            content: wrapped.content || null,
+            toolCalls: wrapped.toolCalls ?? [],
+            stopReason: wrapped.stopReason ?? ((wrapped.toolCalls?.length ?? 0) > 0 ? "tool_use" : "end_turn"),
+            usage: wrapped.usage,
+          };
+        } else {
+          response = await this.llm.completeWithTools!(current, toolSpecs);
+        }
         return { response, messages: current };
       } catch (err) {
         if (!isContextLengthError(err) || attempt >= MAX_CONTEXT_RECOVERY) throw err;
@@ -665,12 +774,13 @@ export class AdaptiveRunner {
     sessionId: number,
     _userId: string | undefined,
     pipelineState: PipelineState,
-    _modelCall: NextFn,
+    toolModelCall: NextFn | null,
     timer: PipelineTimer,
     errors: string[],
     allReasoning: string[],
     allToolResults: any[],
     emit: (event: AgentEvent) => void,
+    controls?: RunControls,
   ): Promise<string> {
     timer.startPhase("agentic_loop");
 
@@ -701,8 +811,14 @@ export class AdaptiveRunner {
       messages.push({ role: entry.role as "user" | "assistant", content: entry.content });
     }
 
-    // Add current message
-    messages.push({ role: "user", content: message });
+    // Add current message. With attachments the user turn is multimodal:
+    // a text block for the message plus the caller-supplied content blocks.
+    const attachments = pipelineState.attachments;
+    messages.push(
+      attachments?.length
+        ? { role: "user", content: [{ type: "text", text: message }, ...attachments] }
+        : { role: "user", content: message },
+    );
 
     // Apply middleware system prompt modifications
     if (!this.middlewareStack.isEmpty) {
@@ -723,19 +839,53 @@ export class AdaptiveRunner {
       `${tc.name}:${JSON.stringify(tc.arguments ?? null)}`;
     const sigCounts = new Map<string, number>();
     const MAX_IDENTICAL_CALLS = 3;
+    // Set when the tool-path wrap-up below has already burned a recovery
+    // completion, so the generic guarantee block doesn't fire a SECOND one.
+    let wrapUpAttempted = false;
+    // Typed terminal state for this run. Default assumes the step cap ends the
+    // loop; every exit path below overwrites it with the real reason.
+    let stopReason: StopReason = "max_iterations";
+    // Live token streaming: forward provider deltas as stream_chunk events.
+    // Emitting is a no-op when nobody subscribed. Tool-decision turns may
+    // stream brief narration before their tool calls — that is intentional
+    // ("watch the agent work"); the final `message` event remains the
+    // authoritative complete answer.
+    const onDelta = this.llm.streamWithTools
+      ? (delta: string) => emit({ type: "stream_chunk", data: { delta } })
+      : undefined;
+    const addUsage = (usage?: { costUsd: number }) => {
+      if (usage) pipelineState.usdCost = (pipelineState.usdCost ?? 0) + usage.costUsd;
+    };
+    const overBudget = (): boolean =>
+      controls?.maxBudgetUsd !== undefined &&
+      (pipelineState.usdCost ?? 0) >= controls.maxBudgetUsd;
 
     if (this.llm.completeWithTools && toolSpecs.length > 0) {
       // Native tool calling path
       for (let step = 0; step < maxSteps; step++) {
+        // Governance rails: these are checked BETWEEN model calls / tool
+        // batches — a fired abort or blown budget stops the run at the next
+        // safe boundary rather than mid-write.
+        if (controls?.signal?.aborted) {
+          stopReason = "aborted";
+          errors.push("Run aborted by caller (AbortSignal)");
+          break;
+        }
+        if (overBudget()) {
+          stopReason = "max_budget";
+          errors.push(`Budget cap reached ($${controls!.maxBudgetUsd}) — stopping`);
+          break;
+        }
         try {
           // Context engineering ("compress"): keep the growing transcript inside
           // the window on long runs so it never overflows mid-task. Proactive
           // compaction uses a token estimate; the call below adds a REACTIVE net
           // that shrinks harder if the provider still rejects it as too long.
           messages = compactMessages(messages);
-          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs);
+          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta);
           messages = recovered.messages;
           const response = recovered.response;
+          addUsage(response.usage);
 
           // Process any tool calls
           if (response.toolCalls.length > 0) {
@@ -748,6 +898,7 @@ export class AdaptiveRunner {
               if (n >= MAX_IDENTICAL_CALLS) repeated = true;
             }
             if (repeated) {
+              stopReason = "error";
               errors.push(`stopped: a tool was called with identical arguments ${MAX_IDENTICAL_CALLS}x with no progress`);
               break;
             }
@@ -757,6 +908,16 @@ export class AdaptiveRunner {
               content: response.content ?? "",
               toolCalls: response.toolCalls,
             });
+
+            // Hard cap on total tool executions for the run.
+            if (
+              controls?.maxToolCalls !== undefined &&
+              allToolResults.length + response.toolCalls.length > controls.maxToolCalls
+            ) {
+              stopReason = "max_tool_calls";
+              errors.push(`Tool-call cap reached (${controls.maxToolCalls}) — stopping`);
+              break;
+            }
 
             // Execute this turn's tool calls with capability-aware scheduling:
             // parallel-safe (read-only) calls fan out concurrently, while a
@@ -826,11 +987,13 @@ export class AdaptiveRunner {
             pipelineState.goalProgress = progress;
             if (progress.completed) {
               allReasoning.push("Goal completed during tool execution");
+              stopReason = "done";
               // Let the model generate a final response with goal-complete context
               try {
-                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs);
+                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta);
                 messages = finalResponse.messages;
                 responseText = finalResponse.response.content ?? "";
+                addUsage(finalResponse.response.usage);
               } catch {
                 responseText = "Task completed successfully.";
               }
@@ -842,8 +1005,10 @@ export class AdaptiveRunner {
 
           // No tool calls - model is responding
           responseText = response.content ?? "";
+          stopReason = "done";
           break;
         } catch (err: any) {
+          stopReason = "error";
           errors.push(err?.message || "Agentic loop step failed");
           break;
         }
@@ -855,7 +1020,8 @@ export class AdaptiveRunner {
       // synthesizes its best answer from everything gathered instead of returning
       // an empty string (a user-visible "the agent returned nothing" on exactly the
       // hard, long-horizon tasks this path is for).
-      if (!responseText.trim()) {
+      if (!responseText.trim() && stopReason !== "aborted" && !overBudget()) {
+        wrapUpAttempted = true;
         try {
           const wrapUp: LLMMessage[] = compactMessages([
             ...messages,
@@ -869,8 +1035,9 @@ export class AdaptiveRunner {
           // Reuse the tool-calling path (same message serialization the loop used,
           // so tool_use/tool_result pairing stays valid) but instruct no more tools
           // and take the text it produces.
-          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs);
+          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs, toolModelCall, onDelta);
           responseText = wrap.response.content ?? "";
+          addUsage(wrap.response.usage);
         } catch (err: any) {
           errors.push(err?.message || "wrap-up completion failed");
         }
@@ -879,7 +1046,9 @@ export class AdaptiveRunner {
       // Fallback: simple completion without native tools
       try {
         responseText = await this.llm.complete(messages);
+        stopReason = "done";
       } catch (err: any) {
+        stopReason = "error";
         errors.push(err?.message || "LLM completion failed");
         responseText = "I can help with that. Could you provide more details?";
       }
@@ -893,16 +1062,21 @@ export class AdaptiveRunner {
     // answer from the tool results it already gathered; if even that yields
     // nothing, fall back to an honest message rather than silence.
     if (!responseText.trim()) {
-      try {
-        messages.push({
-          role: "user",
-          content:
-            "Based on the information and tool results above, write your final " +
-            "answer to the user now, directly and concisely. Do not call any more tools.",
-        });
-        responseText = (await this.llm.complete(messages)).trim();
-      } catch (err: any) {
-        errors.push(err?.message || "final synthesis failed");
+      // Only spend a recovery completion if the tool-path wrap-up hasn't already
+      // tried (and failed) — two serialized recovery calls on the slowest turns
+      // doubled the latency penalty for no extra signal.
+      if (!wrapUpAttempted && stopReason !== "aborted" && !overBudget()) {
+        try {
+          messages.push({
+            role: "user",
+            content:
+              "Based on the information and tool results above, write your final " +
+              "answer to the user now, directly and concisely. Do not call any more tools.",
+          });
+          responseText = (await this.llm.complete(messages)).trim();
+        } catch (err: any) {
+          errors.push(err?.message || "final synthesis failed");
+        }
       }
       if (!responseText.trim()) {
         responseText = allToolResults.some((r) => r?.success)
@@ -910,6 +1084,8 @@ export class AdaptiveRunner {
           : "I wasn't able to complete that request just now. Please try again.";
       }
     }
+
+    pipelineState.stopReason = stopReason;
 
     const phase = timer.endPhase(
       allToolResults.length > 0
@@ -933,12 +1109,13 @@ export class AdaptiveRunner {
     sessionId: number,
     userId: string | undefined,
     pipelineState: PipelineState,
-    modelCallFn: NextFn,
+    toolModelCall: NextFn | null,
     timer: PipelineTimer,
     errors: string[],
     allReasoning: string[],
     allToolResults: any[],
     emit: (event: AgentEvent) => void,
+    controls?: RunControls,
   ): Promise<string> {
     const toolContext: ToolContext = pipelineState.toolContext;
     let memorySnapshot: MemorySnapshot = { claims: [] };
@@ -1086,13 +1263,13 @@ export class AdaptiveRunner {
       // After tree search, generate response via agentic loop with primed context
       responseMessage = await this.runAgenticLoop(
         message, sessionState, sessionId, userId,
-        pipelineState, modelCallFn, timer, errors, allReasoning, allToolResults, emit,
+        pipelineState, toolModelCall, timer, errors, allReasoning, allToolResults, emit, controls,
       );
     } else {
       // Agentic loop with pre-loaded memory and reflexion context
       responseMessage = await this.runAgenticLoop(
         message, sessionState, sessionId, userId,
-        pipelineState, modelCallFn, timer, errors, allReasoning, allToolResults, emit,
+        pipelineState, toolModelCall, timer, errors, allReasoning, allToolResults, emit, controls,
       );
     }
 

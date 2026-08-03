@@ -6,6 +6,7 @@ import type {
   ToolAccess,
 } from "../types.js";
 import { evaluatePolicy, isLoaded, capResultSize } from "./tool.js";
+import { validateToolArgs } from "./schema-validator.js";
 
 /**
  * Tool registry — register, look up, disclose, and safely execute tools.
@@ -27,7 +28,12 @@ export class ToolRegistry {
    *  the context window (and defeat recovery, which can't shrink a huge result
    *  once it lands in the recent-keep window). 0 disables the cap. A tool can
    *  raise or lower it per-tool via `maxResultBytes`. */
-  constructor(private defaultMaxResultBytes = 256 * 1024) {}
+  constructor(
+    private defaultMaxResultBytes = 256 * 1024,
+    /** Default wall-clock cap per execute() call. A hanging tool previously
+     *  hung the entire agent loop (its Promise.all never settled). 0 disables. */
+    private defaultTimeoutMs = 60_000,
+  ) {}
 
   /** Register a tool definition */
   register(tool: ToolDefinition): void {
@@ -174,6 +180,19 @@ export class ToolRegistry {
       return { success: false, error: `Tool not found: ${name}` };
     }
 
+    // 0. Structural argument validation against the declared schema. Catches
+    // hallucinated/malformed arguments at the boundary and returns a
+    // model-readable error (the model self-corrects next turn) instead of the
+    // tool throwing a generic exception mid-execution.
+    const argCheck = validateToolArgs(params ?? {}, tool.parameters ?? {});
+    if (!argCheck.ok) {
+      return {
+        success: false,
+        error: `Invalid arguments for "${name}": ${argCheck.errors.join("; ")}. ` +
+          "Fix the arguments and call the tool again.",
+      };
+    }
+
     // 1. Semantic input validation (friendly error, not a throw).
     if (tool.validate) {
       try {
@@ -211,10 +230,37 @@ export class ToolRegistry {
       }
     }
 
-    // 3. Execute — errors caught into a failed result.
+    // 3. Execute — errors caught into a failed result, bounded by a wall-clock
+    // timeout, and wired to cancellation. The tool sees a composite
+    // AbortSignal (caller's signal + timeout) via context.signal; even a tool
+    // that ignores it can't hang the loop past the deadline.
+    const timeoutMs = tool.timeoutMs ?? this.defaultTimeoutMs;
     let result: ToolResult;
     try {
-      result = await tool.execute(params, context);
+      if (timeoutMs > 0) {
+        const timeoutController = new AbortController();
+        const signals: AbortSignal[] = [timeoutController.signal];
+        if (context.signal) signals.push(context.signal);
+        const composite = signals.length > 1 && typeof (AbortSignal as any).any === "function"
+          ? (AbortSignal as any).any(signals) as AbortSignal
+          : signals[signals.length - 1];
+        const execContext: ToolContext = { ...context, signal: composite };
+
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timeoutController.abort();
+            reject(new Error(`Tool "${name}" timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        });
+        try {
+          result = await Promise.race([tool.execute(params, execContext), timeout]);
+        } finally {
+          clearTimeout(timer);
+        }
+      } else {
+        result = await tool.execute(params, context);
+      }
     } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message };

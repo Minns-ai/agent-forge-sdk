@@ -8,6 +8,7 @@ import type {
   NextFn,
 } from "../types.js";
 import type { LLMMessage, ToolDefinition, ToolResult } from "../../types.js";
+import { contentToText } from "../../llm/content.js";
 import type { BackendProtocol } from "../backend/protocol.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ function estimateTokens(text: string): number {
 function estimateMessageTokens(messages: LLMMessage[]): number {
   let total = 0;
   for (const msg of messages) {
-    total += 4 + estimateTokens(msg.content);
+    total += 4 + estimateTokens(contentToText(msg.content));
     // Count tool call arguments too
     if (msg.toolCalls) {
       for (const tc of msg.toolCalls) {
@@ -102,7 +103,7 @@ function resolveKeepCount(
     let kept = 0;
     let tokenCount = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msgTokens = 4 + estimateTokens(messages[i].content);
+      const msgTokens = 4 + estimateTokens(contentToText(messages[i].content));
       if (tokenCount + msgTokens > value) break;
       tokenCount += msgTokens;
       kept++;
@@ -114,7 +115,7 @@ function resolveKeepCount(
     let kept = 0;
     let tokenCount = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msgTokens = 4 + estimateTokens(messages[i].content);
+      const msgTokens = 4 + estimateTokens(contentToText(messages[i].content));
       if (tokenCount + msgTokens > target) break;
       tokenCount += msgTokens;
       kept++;
@@ -129,7 +130,7 @@ function resolveKeepCount(
 const SUMMARY_MARKER = "[agent-forge:summarization]";
 
 function isSummaryMessage(msg: LLMMessage): boolean {
-  return msg.role === "user" && msg.content.includes(SUMMARY_MARKER);
+  return msg.role === "user" && typeof msg.content === "string" && msg.content.includes(SUMMARY_MARKER);
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
@@ -391,8 +392,13 @@ export class ContextSummarizationMiddleware implements Middleware {
         }
       }
 
-      // Truncate large tool result content
-      if (msg.role === "tool" && msg.content.length > this.maxArgLength) {
+      // Truncate large tool result content (string-only — multimodal block
+      // messages are never split)
+      if (
+        msg.role === "tool" &&
+        typeof msg.content === "string" &&
+        msg.content.length > this.maxArgLength
+      ) {
         modified = true;
         this.totalArgTruncations++;
         return {
@@ -445,7 +451,7 @@ export class ContextSummarizationMiddleware implements Middleware {
 
     // Generate summary via LLM
     const conversationText = toSummarize
-      .map((m) => "[" + m.role + "]: " + m.content.slice(0, 2000))
+      .map((m) => "[" + m.role + "]: " + contentToText(m.content).slice(0, 2000))
       .join("\n\n");
 
     // Build intent-aware context for the summary prompt
@@ -527,7 +533,7 @@ export class ContextSummarizationMiddleware implements Middleware {
       const section = "\n\n---\n\n## Conversation History (offloaded " + timestamp + ")\n\n" +
         messages
           .filter((m) => !isSummaryMessage(m))
-          .map((m) => "**" + m.role + ":** " + m.content.slice(0, 5000))
+          .map((m) => "**" + m.role + ":** " + contentToText(m.content).slice(0, 5000))
           .join("\n\n");
 
       // Append to existing file

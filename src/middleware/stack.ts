@@ -226,6 +226,73 @@ export class MiddlewareStack {
   }
 
   /**
+   * Build the onion-wrapped model call for NATIVE TOOL-CALLING loops.
+   *
+   * Same onion as {@link buildModelCall}, but the terminal invokes
+   * `llm.completeWithTools()` so the agentic loop's calls flow through every
+   * middleware's `wrapModelCall` (caching, summarization, eviction,
+   * truncation, patching) instead of bypassing the stack entirely.
+   *
+   * The request's `tools` field carries the specs through the chain; if a
+   * middleware rebuilds the request and drops the field, the terminal falls
+   * back to `defaultTools` captured here, so tool calling never silently
+   * degrades to a text-only call.
+   *
+   * @param llm - Provider with completeWithTools (caller must verify support)
+   * @param defaultTools - Tool specs used when a request doesn't carry its own
+   */
+  buildToolModelCall(
+    llm: LLMProvider,
+    defaultTools: import("../types.js").LLMToolSpec[],
+    state: PipelineState,
+    context: MiddlewareContext,
+  ): NextFn {
+    const terminal: NextFn = async (request: ModelRequest): Promise<ModelResponse> => {
+      const modifiedMessages = this.applySystemPromptModifications(request.messages, state);
+      const options = request.options
+        ? { ...request.options, metadata: { ...request.options.metadata, ...request.metadata } }
+        : { metadata: request.metadata };
+
+      const t0 = performance.now();
+      const response = await llm.completeWithTools!(
+        modifiedMessages,
+        request.tools ?? defaultTools,
+        options,
+      );
+      const duration = Math.round(performance.now() - t0);
+
+      return {
+        content: response.content ?? "",
+        toolCalls: response.toolCalls,
+        stopReason: response.stopReason,
+        usage: response.usage,
+        metadata: {
+          ...request.metadata,
+          llm_duration_ms: duration,
+        },
+      };
+    };
+
+    let chain: NextFn = terminal;
+    for (let i = this.middlewares.length - 1; i >= 0; i--) {
+      const mw = this.middlewares[i];
+      if (!mw.wrapModelCall) continue;
+      const next = chain;
+      const wrappedMw = mw;
+      chain = async (request: ModelRequest): Promise<ModelResponse> => {
+        try {
+          return await wrappedMw.wrapModelCall!(request, next, state, context);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          state.errors.push(`Middleware "${wrappedMw.name}" wrapModelCall failed: ${message}`);
+          return next(request);
+        }
+      };
+    }
+    return chain;
+  }
+
+  /**
    * Apply all modifySystemPrompt hooks to the system message in a message array.
    *
    * Finds the first system message, runs all middleware modifiers on its content,
@@ -239,6 +306,9 @@ export class MiddlewareStack {
     if (systemIdx === -1) return messages;
 
     let systemContent = messages[systemIdx].content;
+    // System messages are string-typed in practice; the modifier hooks take and
+    // return strings, so skip modification on (unexpected) block content.
+    if (typeof systemContent !== "string") return messages;
 
     // Apply each middleware's modifier in order
     for (const mw of this.middlewares) {

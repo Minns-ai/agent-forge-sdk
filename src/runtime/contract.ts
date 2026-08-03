@@ -61,4 +61,11 @@ export interface InvokeResponse {
   interrupted_at?: string;
   /** Non-fatal errors accumulated this turn. */
   errors?: string[];
+  /** Typed terminal state of the agent loop (PipelineResult.stopReason), when
+   *  the runtime reports one — e.g. "done", "max_iterations", "max_tool_calls",
+   *  "max_budget", "aborted". Additive/optional: absent from older runtimes. */
+  stop_reason?: string;
+  /** Estimated USD cost accrued during the run (PipelineResult.usdCost), when
+   *  cost accounting is on. Additive/optional. */
+  usd_cost?: number;
 }

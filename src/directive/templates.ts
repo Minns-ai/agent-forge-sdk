@@ -53,7 +53,13 @@ export function buildAgentPrompt(params: {
 
   const toolResultLines = (toolResults ?? []).map((tr: any) => {
     if (tr?.success) {
-      return `- ✓ ${tr.result?.preference_stored ? `Stored: ${tr.result.preference_type ?? "?"} = ${tr.result.preference_value ?? "?"}` : "Tool succeeded"}`;
+      if (tr.result?.preference_stored) {
+        return `- ✓ Stored: ${tr.result.preference_type ?? "?"} = ${tr.result.preference_value ?? "?"}`;
+      }
+      // Surface the ACTUAL tool output (capped) — rendering every result as
+      // "Tool succeeded" starved the response model of what the tools found.
+      const payload = tr.result !== undefined ? JSON.stringify(tr.result) : "";
+      return `- ✓ ${tr.toolName ?? "tool"} → ${payload.length > 400 ? payload.slice(0, 400) + "…" : payload || "ok"}`;
     }
     return `- ✗ ${tr.error || "Tool failed"}`;
   });
