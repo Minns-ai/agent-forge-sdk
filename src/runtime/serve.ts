@@ -1,5 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { InvokeRequest, InvokeResponse } from "./contract.js";
+import type {
+  InvokeRequest,
+  InvokeResponse,
+  ExecuteCandidateRequest,
+  ExecuteCandidateResponse,
+} from "./contract.js";
 import type { StepHandler } from "./durable.js";
 import { readMinnsEnv, type MinnsRails } from "./env.js";
 import { telemetryFromRails, type TelemetryReporter } from "./otlp.js";
@@ -15,16 +20,40 @@ import {
 
 // The HTTP harness a deployed agent runs. Exposes the control-plane contract:
 //
-//   POST /v1/invoke   advance a run one turn (see contract.ts)
-//   GET  /healthz     liveness
+//   POST /v1/invoke             advance a run one turn (see contract.ts)
+//   POST /v1/execute-candidate  run a human-approved HITL candidate (opt-in)
+//   GET  /healthz               liveness
 //
 // It reads the env rails on boot and wires telemetry + log shipping, so a
 // deployed agent gets the "observed by us" tier for free. The durable tier is
 // the same endpoint driven in a multi-step loop by the Temporal worker.
+//
+// ## Authentication
+//
+// This harness does NOT authenticate inbound requests — every route it serves
+// (invoke, execute-candidate, A2A) is equally unauthenticated here, by design:
+// the deployment fronts it with a token-checking proxy (the managed runtime
+// checks `Authorization: Bearer $MINNS_INVOKE_TOKEN` on everything but the
+// health probes). `/v1/execute-candidate` deliberately inherits exactly the
+// same posture as `/v1/invoke` — one front door, one credential. Do not expose
+// this server directly to the internet.
 
 export interface ServeAgentOptions {
   /** The step handler (build from a graph with createGraphStepHandler). */
   handler: StepHandler;
+  /** Execute a human-approved HITL candidate (see ExecuteCandidateRequest).
+   *
+   *  Supply this when the agent gates write/destructive tools behind
+   *  propose-don't-execute: it is what actually runs the ORIGINAL tool once a
+   *  human approves in the dashboard. Typically a thin wrapper over a
+   *  ToolRegistry holding the unwrapped tools (or `executeApproved` against a
+   *  CandidateStore).
+   *
+   *  When omitted, `POST /v1/execute-candidate` 404s — that is the signal to
+   *  the control plane that this agent does not support candidates at all,
+   *  distinct from an approval that failed. Should not throw; if it does, the
+   *  harness reports `{ success: false, error }` rather than a 500. */
+  onExecuteCandidate?: (req: ExecuteCandidateRequest) => Promise<ExecuteCandidateResponse>;
   /** Port to listen on. Defaults to PORT env or 8080 (matches the deploy default). */
   port?: number;
   /** Env source (defaults to process.env). */
@@ -156,6 +185,80 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
         });
         await telemetry?.flush();
         sendJson(res, 200, result);
+        return;
+      }
+
+      // ── HITL: execute a human-approved candidate ─────────────────────────
+      // Same body-size cap, same JSON handling, same telemetry/log treatment as
+      // /v1/invoke above — and the same (absent) inbound auth, so the front-door
+      // proxy protects both routes with one credential. The status codes differ
+      // by contract: a tool that RAN and failed is a 200 {success:false}; only a
+      // malformed request is a 4xx. Absent handler → 404, which tells the
+      // control plane "this agent has no candidates" instead of "route missing".
+      if (method === "POST" && url.replace(/\/$/, "") === "/v1/execute-candidate") {
+        if (!opts.onExecuteCandidate) {
+          sendJson(res, 404, { error: "execute-candidate not supported by this agent" });
+          return;
+        }
+        const start = Date.now();
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const b = (body ?? {}) as Partial<ExecuteCandidateRequest>;
+        if (typeof b.tool !== "string" || !b.tool) {
+          sendJson(res, 400, { error: "tool is required" });
+          return;
+        }
+        const request: ExecuteCandidateRequest = {
+          tool: b.tool,
+          params:
+            b.params && typeof b.params === "object" && !Array.isArray(b.params)
+              ? (b.params as Record<string, unknown>)
+              : {},
+          ...(typeof b.run_id === "string" && b.run_id ? { run_id: b.run_id } : {}),
+        };
+
+        let result: ExecuteCandidateResponse;
+        try {
+          result = await opts.onExecuteCandidate(request);
+        } catch (err) {
+          // A throwing handler is an execution failure, not a broken route: the
+          // human's approval already happened, so answer it with the outcome.
+          const message = err instanceof Error ? err.message : String(err);
+          logs?.log(`execute-candidate error for tool ${request.tool}: ${message}`, "stderr");
+          telemetry?.span("agent.execute_candidate", {
+            startTimeMs: start,
+            endTimeMs: Date.now(),
+            attributes: {
+              "minns.candidate.tool": request.tool,
+              ...(request.run_id ? { "minns.run.id": request.run_id } : {}),
+            },
+            error: message,
+          });
+          await telemetry?.flush();
+          sendJson(res, 200, { success: false, error: message });
+          return;
+        }
+
+        telemetry?.span("agent.execute_candidate", {
+          startTimeMs: start,
+          endTimeMs: Date.now(),
+          attributes: {
+            "minns.candidate.tool": request.tool,
+            "minns.candidate.success": result?.success === true,
+            ...(request.run_id ? { "minns.run.id": request.run_id } : {}),
+          },
+        });
+        await telemetry?.flush();
+        sendJson(res, 200, {
+          success: result?.success === true,
+          ...(result?.result !== undefined ? { result: result.result } : {}),
+          ...(result?.error !== undefined ? { error: result.error } : {}),
+        } satisfies ExecuteCandidateResponse);
         return;
       }
 

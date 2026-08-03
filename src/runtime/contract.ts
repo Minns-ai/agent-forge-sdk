@@ -17,6 +17,11 @@
 //   human approves, the worker POSTs again with `resume: true` and the agent
 //   continues from its checkpoint. The SDK's `invoke()`/checkpoint/interrupt
 //   model maps directly onto this — no separate protocol.
+//
+// A third, out-of-band route completes the HITL story: `/v1/execute-candidate`
+// (ExecuteCandidateRequest/Response below). It belongs to no run turn — the
+// control plane calls it after a human approves a proposed action, to run the
+// tool the agent deliberately did not run.
 
 /** Standardized OTel resource attribute carrying the agent id, so telemetry is
  *  attributable with or without the env rails (env rails are a convenience
@@ -37,6 +42,44 @@ export interface InvokeRequest {
    *  approval). The agent may also auto-detect resume from an existing
    *  checkpoint; this flag makes intent explicit. */
   resume?: boolean;
+}
+
+/** Control plane → agent. Execute a human-approved HITL candidate.
+ *
+ * The platform's HITL flow is *propose, don't execute*: a gated tool submits a
+ * candidate (tool name + params) to the approval queue instead of running, the
+ * run completes normally, and a human approves in the dashboard later. The
+ * control plane then POSTs this to `/v1/execute-candidate` so the ORIGINAL,
+ * ungated tool runs — out of band from any invoke. Without the route, the
+ * human's click is consumed and nothing happens.
+ *
+ * See `patterns/candidate.ts` (`wrapToolAsCandidate` / `executeApproved`) for
+ * the in-process equivalent of this exchange.
+ */
+export interface ExecuteCandidateRequest {
+  /** Name of the ORIGINAL (unwrapped) tool to run. */
+  tool: string;
+  /** The parameters to run it with — the reviewer's revision when they edited
+   *  one, else the model's original proposal. The human's edit always wins,
+   *  and the control plane is what resolves that, not the agent. */
+  params: Record<string, unknown>;
+  /** The run that proposed the call, so side effects (artifacts, activity,
+   *  spend) attribute back to it. Absent for out-of-band executions. */
+  run_id?: string;
+}
+
+/** Agent → control plane. The outcome of executing an approved candidate.
+ *
+ * Every *execution* outcome — including a tool that ran and failed — is a 200
+ * carrying this body. Non-200 is reserved for malformed requests (400) and an
+ * agent that does not support candidates at all (404), so the control plane can
+ * tell "your action failed" from "this agent can't do that". */
+export interface ExecuteCandidateResponse {
+  success: boolean;
+  /** Tool result payload on success. */
+  result?: unknown;
+  /** Why it failed, when `success` is false. */
+  error?: string;
 }
 
 /** Mirrors the SDK's InvokeStatus, plus "running" for an advanced-but-not-done
