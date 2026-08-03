@@ -77,6 +77,19 @@ export class MiddlewareStack {
     return this.middlewares.length === 0;
   }
 
+  /**
+   * True when at least one registered middleware wraps the model call.
+   *
+   * Callers use this to decide whether a request may take a STREAMING provider
+   * path: a stream cannot flow through the onion today (its `NextFn` returns a
+   * whole `ModelResponse`, not a stream), so streaming and `wrapModelCall`
+   * are mutually exclusive and correctness must win — silently bypassing the
+   * onion makes prompt caching, summarization, eviction and truncation inert.
+   */
+  get hasWrapModelCall(): boolean {
+    return this.middlewares.some((mw) => typeof mw.wrapModelCall === "function");
+  }
+
   /** Get names of all registered middlewares (in order) */
   names(): string[] {
     return this.middlewares.map((mw) => mw.name);

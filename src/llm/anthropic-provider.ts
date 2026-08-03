@@ -384,6 +384,19 @@ export class AnthropicProvider implements LLMProvider {
    * content_block_delta events; the complete message (including tool_use
    * blocks, whose inputs stream as partial JSON and are only reliable once
    * accumulated) comes from finalMessage().
+   *
+   * Usage accounting is ABANDONMENT-SAFE. A consumer that walks away mid-stream
+   * (a disconnected SSE client, a throwing onDelta, an explicit
+   * `generator.return()`) resumes this body at its suspended `yield` and exits
+   * without running the trailing statements — so reporting usage only after the
+   * delta loop meant a turn the provider really billed was metered at $0, which
+   * defeats per-run/daily/monthly budget caps. Tokens are therefore tracked
+   * incrementally off the raw events (`message_start` carries input/cache
+   * counts, `message_delta.usage` the running output count) and reported from a
+   * `finally`, which runs on BOTH normal completion and early return. A
+   * `reported` flag keeps it to exactly one call: the authoritative
+   * `finalMessage()` usage when the stream completed, the accumulated partial
+   * otherwise.
    */
   async *streamWithTools(
     messages: LLMMessage[],
@@ -393,6 +406,27 @@ export class AnthropicProvider implements LLMProvider {
     const client = await this.getClient();
     const enableCaching = options?.metadata?.enable_prompt_caching === true;
     const { system, msgs } = this.splitMessages(messages, { enableCaching });
+
+    let reported = false;
+    const report = (usage: TokenUsage): void => {
+      if (reported) return;
+      reported = true;
+      this.onUsage?.(usage);
+    };
+    // Incrementally accumulated counters (the partial fallback).
+    let inputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
+    let outputTokens = 0;
+    const partialUsage = (): TokenUsage =>
+      makeUsage({
+        provider: "anthropic",
+        model: this.model,
+        inputTokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+        outputTokens,
+        cachedInputTokens: cacheReadTokens,
+        cacheCreationTokens,
+      });
 
     try {
       const stream = client.messages.stream(
@@ -410,19 +444,39 @@ export class AnthropicProvider implements LLMProvider {
       );
 
       for await (const event of stream) {
-        if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+        // Track spend as it accrues, so an abandoned stream still meters.
+        if (event.type === "message_start") {
+          const u: any = event.message?.usage ?? {};
+          inputTokens = u.input_tokens ?? 0;
+          cacheReadTokens = u.cache_read_input_tokens ?? 0;
+          cacheCreationTokens = u.cache_creation_input_tokens ?? 0;
+          outputTokens = u.output_tokens ?? outputTokens;
+        } else if (event.type === "message_delta") {
+          const u: any = (event as any).usage ?? {};
+          if (typeof u.output_tokens === "number") outputTokens = u.output_tokens;
+          if (typeof u.input_tokens === "number") inputTokens = u.input_tokens;
+        } else if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
           yield { type: "text_delta", delta: event.delta.text };
         }
       }
 
       const finalMessage: any = await stream.finalMessage();
       const usage = usageFromAnthropic(this.model, finalMessage);
-      this.onUsage?.(usage);
+      // Authoritative — reported BEFORE the final yield so a consumer that
+      // stops reading after `done` still gets metered.
+      report(usage);
 
       yield { type: "done", response: toolResponseFromAnthropic(finalMessage, usage) };
     } catch (error) {
       if (error instanceof LLMError) throw error;
       throw new LLMError(error instanceof Error ? error.message : String(error));
+    } finally {
+      // Reached on early return (consumer abandoned the generator) and on
+      // failure. Report the partial only when the provider actually streamed
+      // something — a request that never produced usage was never billed.
+      if (!reported && inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens > 0) {
+        report(partialUsage());
+      }
     }
   }
 }

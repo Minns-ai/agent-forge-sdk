@@ -30,9 +30,17 @@ export class ToolRegistry {
    *  raise or lower it per-tool via `maxResultBytes`. */
   constructor(
     private defaultMaxResultBytes = 256 * 1024,
-    /** Default wall-clock cap per execute() call. A hanging tool previously
-     *  hung the entire agent loop (its Promise.all never settled). 0 disables. */
-    private defaultTimeoutMs = 60_000,
+    /** Default wall-clock cap per execute() call — a runaway BACKSTOP, not a
+     *  functional limit. It exists only so a hung tool can't wedge the agent
+     *  forever (a never-settling handler previously stalled the whole loop).
+     *  10 minutes is deliberately far above what any real tool needs: the race
+     *  that fires here does NOT cancel work the tool didn't wire to
+     *  `context.signal`, so a too-tight default returns a failure while the
+     *  tool keeps running — the model retries and the same work is billed
+     *  twice. Legitimate long tools (image/video/UI generation, peer
+     *  delegation) routinely run 90-150s. A tool that wants a tighter bound
+     *  declares its own `timeoutMs`. 0 disables the backstop. */
+    private defaultTimeoutMs = 600_000,
   ) {}
 
   /** Register a tool definition */
@@ -250,7 +258,14 @@ export class ToolRegistry {
         const timeout = new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             timeoutController.abort();
-            reject(new Error(`Tool "${name}" timed out after ${timeoutMs}ms`));
+            reject(
+              new Error(
+                `Tool "${name}" timed out after ${timeoutMs}ms (runaway backstop). ` +
+                  `The tool may still be running — its work was not cancelled unless it ` +
+                  `honours context.signal. Tools that need a different bound should ` +
+                  `declare their own \`timeoutMs\` (0 disables the backstop).`,
+              ),
+            );
           }, timeoutMs);
         });
         try {

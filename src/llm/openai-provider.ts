@@ -4,6 +4,7 @@ import { contentToText } from "./content.js";
 import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
+import { estimateTokens } from "../pipeline/context-compaction.js";
 
 /** Extract normalized usage from an OpenAI chat-completions payload. */
 function usageFromOpenAI(provider: string, model: string, payload: any): TokenUsage {
@@ -335,6 +336,16 @@ export class OpenAIProvider implements LLMProvider {
    * string that accumulates across chunks and is parsed once at the end
    * (falling back to {} on parse failure). `stream_options.include_usage`
    * makes the API emit a final usage chunk, mapped like completeWithTools.
+   *
+   * Usage accounting is ABANDONMENT-SAFE. A consumer that walks away mid-stream
+   * (a disconnected SSE client, a throwing onDelta, an explicit
+   * `generator.return()`) resumes this body at its suspended `yield` and exits
+   * without running the trailing statements — so reporting usage only after the
+   * read loop meant a turn the provider really billed was metered at $0, which
+   * defeats per-run/daily/monthly budget caps. Usage is therefore reported from
+   * a `finally` (runs on normal completion AND early return), exactly once, and
+   * the same block aborts the upstream request so an abandoned generator stops
+   * the socket instead of streaming — and billing — into a dropped connection.
    */
   async *streamWithTools(
     messages: LLMMessage[],
@@ -343,6 +354,18 @@ export class OpenAIProvider implements LLMProvider {
   ): AsyncGenerator<LLMStreamEvent> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    // Hoisted out of the try so the `finally` can meter and clean up whatever
+    // the stream got through before it was abandoned.
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let reported = false;
+    let content = "";
+    const toolAccumulator = new Map<number, { id?: string; name?: string; args: string }>();
+    const report = (usage: TokenUsage): void => {
+      if (reported) return;
+      reported = true;
+      this.onUsage?.(usage);
+    };
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -370,16 +393,13 @@ export class OpenAIProvider implements LLMProvider {
         throw new LLMError(`LLM stream failed with status ${response.status}`, response.status, body);
       }
 
-      const reader = response.body?.getReader();
+      reader = response.body?.getReader();
       if (!reader) throw new LLMError("No response body for streaming");
 
       const decoder = new TextDecoder();
       let buffer = "";
-      let content = "";
       let finishReason: string | undefined;
       let usagePayload: any = null;
-      // Accumulate tool-call fragments keyed by their stream index.
-      const toolAccumulator = new Map<number, { id?: string; name?: string; args: string }>();
 
       // Terminates on the "[DONE]" sentinel, or on EOF for servers that
       // close the stream without sending one.
@@ -432,8 +452,14 @@ export class OpenAIProvider implements LLMProvider {
         }
       }
 
-      const usage = usageFromOpenAI(this.providerLabel, this.model, usagePayload ?? {});
-      if (usagePayload) this.onUsage?.(usage);
+      // Authoritative when the terminal usage chunk arrived; otherwise a
+      // best-effort estimate (see estimateStreamUsage) so the turn is still
+      // metered. Reported BEFORE the final yield so a consumer that stops
+      // reading after `done` is still accounted for.
+      const usage = usagePayload
+        ? usageFromOpenAI(this.providerLabel, this.model, usagePayload)
+        : this.estimateStreamUsage(messages, content, toolAccumulator);
+      report(usage);
 
       const toolCalls: LLMToolCall[] = [...toolAccumulator.entries()]
         .sort(([a], [b]) => a - b)
@@ -457,7 +483,45 @@ export class OpenAIProvider implements LLMProvider {
       throw new LLMError(error instanceof Error ? error.message : String(error));
     } finally {
       clearTimeout(timeoutId);
+      // Abandonment cleanup. Without this the upstream request kept running
+      // (and billing) into a socket nobody reads: the old `finally` only
+      // cleared the timeout. abort() + reader.cancel() actually stop it.
+      // Both are no-ops once the stream finished normally.
+      controller.abort();
+      if (reader) await reader.cancel().catch(() => {});
+      // Early return / failure: meter whatever the provider streamed. Only when
+      // a body was actually opened — a request rejected before that (401, DNS,
+      // pre-connect abort) was never billed and must not be charged.
+      if (!reported && reader) {
+        report(this.estimateStreamUsage(messages, content, toolAccumulator));
+      }
     }
+  }
+
+  /**
+   * Best-effort token estimate for a stream that never delivered the terminal
+   * usage chunk — the server didn't honour `stream_options.include_usage`, or
+   * the consumer abandoned the generator mid-stream.
+   *
+   * This is an ESTIMATE (chars/4 heuristic over the request messages and the
+   * text/tool-argument bytes streamed back), not provider-reported truth. It
+   * exists so budget enforcement isn't silently bypassed: metering a billed
+   * turn at $0 would let per-run/daily/monthly caps be exceeded without ever
+   * tripping. Prefer the authoritative usage chunk whenever it arrives.
+   */
+  private estimateStreamUsage(
+    messages: LLMMessage[],
+    content: string,
+    toolAccumulator: Map<number, { args: string }>,
+  ): TokenUsage {
+    const streamedOut =
+      content + [...toolAccumulator.values()].map((acc) => acc.args).join("");
+    return makeUsage({
+      provider: this.providerLabel,
+      model: this.model,
+      inputTokens: estimateTokens(messages),
+      outputTokens: estimateTokens([{ role: "assistant", content: streamedOut }]),
+    });
   }
 }
 
