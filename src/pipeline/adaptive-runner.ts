@@ -4,6 +4,7 @@ import type {
   LLMMessage,
   LLMToolSpec,
   LLMToolResponse,
+  LLMCompletionOptions,
   SessionState,
   GoalChecker,
   GoalProgress,
@@ -489,6 +490,15 @@ export class AdaptiveRunner {
 
     const emit = (event: AgentEvent) => emitter?.emit(event);
 
+    // Should this run take the provider's STREAMING path? Only when the deltas
+    // have somewhere to go (an emitter was supplied — `agent.run()` passes
+    // none) AND no middleware wraps the model call. Streamed calls bypass the
+    // `wrapModelCall` onion, so with e.g. PromptCacheMiddleware installed
+    // streaming would silently disable caching and every other wrapModelCall
+    // middleware. Correctness wins over time-to-first-token until the onion
+    // can carry a stream (see runAgenticLoop's onDelta comment).
+    const streamToEmitter = emitter !== undefined && !this.middlewareStack.hasWrapModelCall;
+
     // ── Build PipelineState ──────────────────────────────────────────────
     const pipelineState: PipelineState = {
       message,
@@ -605,12 +615,12 @@ export class AdaptiveRunner {
     if (tier === "graph") {
       responseMessage = await this.runGraphPipeline(
         message, sessionState, sessionId, userId,
-        pipelineState, toolModelCallFn, timer, errors, allReasoning, allToolResults, emit, controls,
+        pipelineState, toolModelCallFn, timer, errors, allReasoning, allToolResults, emit, streamToEmitter, controls,
       );
     } else {
       responseMessage = await this.runAgenticLoop(
         message, sessionState, sessionId, userId,
-        pipelineState, toolModelCallFn, timer, errors, allReasoning, allToolResults, emit, controls,
+        pipelineState, toolModelCallFn, timer, errors, allReasoning, allToolResults, emit, streamToEmitter, controls,
       );
     }
 
@@ -717,6 +727,10 @@ export class AdaptiveRunner {
     toolSpecs: LLMToolSpec[],
     via?: NextFn | null,
     onDelta?: (delta: string) => void,
+    /** Completion options for this call. Threaded IDENTICALLY into all three
+     *  paths below so the streaming path can't quietly drop settings the
+     *  non-streaming paths honour. */
+    options?: LLMCompletionOptions,
   ): Promise<{ response: LLMToolResponse; messages: LLMMessage[] }> {
     let current = messages;
     for (let attempt = 0; ; attempt++) {
@@ -724,16 +738,18 @@ export class AdaptiveRunner {
         // Three call paths, in preference order:
         // 1. streamWithTools when the provider supports it AND a delta consumer
         //    is attached — the answer streams token-by-token (stream_chunk
-        //    events), so time-to-first-token stops being total run time. Note:
-        //    streamed calls bypass wrapModelCall middlewares (a stream cannot
-        //    flow through the request/response onion); system-prompt
-        //    modifications still apply because they act on `messages`.
+        //    events), so time-to-first-token stops being total run time. The
+        //    caller only attaches `onDelta` when no wrapModelCall middleware is
+        //    registered, because streamed calls bypass the request/response
+        //    onion (a stream cannot flow through a NextFn that returns a whole
+        //    ModelResponse); system-prompt modifications still apply because
+        //    they act on `messages`.
         // 2. The middleware onion (via) for non-streaming tool calls.
         // 3. Direct provider call.
         let response: LLMToolResponse;
         if (onDelta && this.llm.streamWithTools) {
           let final: LLMToolResponse | null = null;
-          for await (const ev of this.llm.streamWithTools(current, toolSpecs)) {
+          for await (const ev of this.llm.streamWithTools(current, toolSpecs, options)) {
             if (ev.type === "text_delta") {
               if (ev.delta) onDelta(ev.delta);
             } else if (ev.type === "done") {
@@ -747,6 +763,7 @@ export class AdaptiveRunner {
             messages: current,
             tools: toolSpecs,
             purpose: "action_decision",
+            options,
             metadata: {},
           });
           response = {
@@ -756,7 +773,7 @@ export class AdaptiveRunner {
             usage: wrapped.usage,
           };
         } else {
-          response = await this.llm.completeWithTools!(current, toolSpecs);
+          response = await this.llm.completeWithTools!(current, toolSpecs, options);
         }
         return { response, messages: current };
       } catch (err) {
@@ -780,6 +797,9 @@ export class AdaptiveRunner {
     allReasoning: string[],
     allToolResults: any[],
     emit: (event: AgentEvent) => void,
+    /** True when this run has a subscribed event emitter AND no wrapModelCall
+     *  middleware — the only case where the streaming provider path is used. */
+    streamToEmitter: boolean,
     controls?: RunControls,
   ): Promise<string> {
     timer.startPhase("agentic_loop");
@@ -846,13 +866,29 @@ export class AdaptiveRunner {
     // loop; every exit path below overwrites it with the real reason.
     let stopReason: StopReason = "max_iterations";
     // Live token streaming: forward provider deltas as stream_chunk events.
-    // Emitting is a no-op when nobody subscribed. Tool-decision turns may
-    // stream brief narration before their tool calls — that is intentional
-    // ("watch the agent work"); the final `message` event remains the
-    // authoritative complete answer.
-    const onDelta = this.llm.streamWithTools
-      ? (delta: string) => emit({ type: "stream_chunk", data: { delta } })
-      : undefined;
+    // Tool-decision turns may stream brief narration before their tool calls —
+    // that is intentional ("watch the agent work"); the final `message` event
+    // remains the authoritative complete answer.
+    //
+    // Streaming is taken ONLY when it is both wanted and safe:
+    //   (a) `streamToEmitter` — an event emitter was supplied for this run, so
+    //       the deltas actually reach someone. Gating on provider capability
+    //       alone made EVERY run take the streaming path (agent.run() passes no
+    //       emitter), streaming to nobody.
+    //   (b) no `wrapModelCall` middleware is registered. Streamed calls bypass
+    //       the middleware onion, so taking that path with e.g.
+    //       PromptCacheMiddleware installed silently disables caching (large
+    //       system prompts re-billed at full rate every loop step) along with
+    //       ContextSummarization / ToolResultEviction / ArgumentTruncation /
+    //       PatchToolCalls.
+    // The two are mutually exclusive today because the onion's `NextFn` returns
+    // a whole ModelResponse rather than a stream — an agent that registers
+    // wrapModelCall middleware therefore does NOT stream. Making them compose
+    // needs a streaming-aware onion; that is the follow-up.
+    const onDelta =
+      streamToEmitter && this.llm.streamWithTools
+        ? (delta: string) => emit({ type: "stream_chunk", data: { delta } })
+        : undefined;
     const addUsage = (usage?: { costUsd: number }) => {
       if (usage) pipelineState.usdCost = (pipelineState.usdCost ?? 0) + usage.costUsd;
     };
@@ -1115,6 +1151,8 @@ export class AdaptiveRunner {
     allReasoning: string[],
     allToolResults: any[],
     emit: (event: AgentEvent) => void,
+    /** Forwarded to the agentic loop this pipeline finishes with. */
+    streamToEmitter: boolean,
     controls?: RunControls,
   ): Promise<string> {
     const toolContext: ToolContext = pipelineState.toolContext;
@@ -1263,13 +1301,13 @@ export class AdaptiveRunner {
       // After tree search, generate response via agentic loop with primed context
       responseMessage = await this.runAgenticLoop(
         message, sessionState, sessionId, userId,
-        pipelineState, toolModelCall, timer, errors, allReasoning, allToolResults, emit, controls,
+        pipelineState, toolModelCall, timer, errors, allReasoning, allToolResults, emit, streamToEmitter, controls,
       );
     } else {
       // Agentic loop with pre-loaded memory and reflexion context
       responseMessage = await this.runAgenticLoop(
         message, sessionState, sessionId, userId,
-        pipelineState, toolModelCall, timer, errors, allReasoning, allToolResults, emit, controls,
+        pipelineState, toolModelCall, timer, errors, allReasoning, allToolResults, emit, streamToEmitter, controls,
       );
     }
 
