@@ -94,6 +94,7 @@ export {
   UsageAccumulator,
 } from "./llm/usage.js";
 export type { TokenUsage, ModelPricing, UsageSink } from "./llm/usage.js";
+export { supportsSamplingParams, samplingParams } from "./llm/model-caps.js";
 export {
   withRetry,
   isTransientError,
