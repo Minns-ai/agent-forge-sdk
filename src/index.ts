@@ -3,7 +3,7 @@ export * from "./runtime/index.js";
 
 // ─── Core ────────────────────────────────────────────────────────────────────
 export { AgentForge } from "./agent.js";
-export { SimpleAgent } from "./simple-agent.js";
+export { SimpleAgent, userFacingLlmError } from "./simple-agent.js";
 export type { SimpleAgentConfig, SimpleAgentStep } from "./simple-agent.js";
 export {
   compactMessages,

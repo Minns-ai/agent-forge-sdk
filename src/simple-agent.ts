@@ -19,6 +19,25 @@ import type { ResilienceConfig } from "./llm/resilience.js";
 import { estimateCost } from "./llm/usage.js";
 import { estimateTokens, compactMessages } from "./pipeline/context-compaction.js";
 
+/**
+ * Map any LLM/provider error to a calm, user-safe sentence.
+ *
+ * Provider errors routinely embed raw JSON, HTTP status codes, account/billing
+ * details, request ids, and internal URLs (e.g. Anthropic's "Your credit
+ * balance is too low… go to Plans & Billing"). NONE of that should ever reach a
+ * user. Callers log the raw error for operators and surface only this text.
+ */
+export function userFacingLlmError(err: unknown): string {
+  const raw = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+  if (/rate.?limit|too many requests|overloaded|capacity|\b429\b|\b503\b|\b529\b/.test(raw))
+    return "The model is busy right now. Please try again in a moment.";
+  if (/credit balance|purchase credits|plans & ?billing|insufficient_quota|insufficient credits|insufficient funds|quota|billing|payment required|\b402\b/.test(raw))
+    return "The model is temporarily unavailable. Please try again shortly.";
+  if (/timeout|timed out|etimedout|econnreset|econnrefused|eai_again|enotfound|fetch failed|socket hang up|network|temporarily unavailable/.test(raw))
+    return "The model took too long to respond. Please try again.";
+  return "The model was unavailable. Please try again.";
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 /** One parsed step of the agent's loop, surfaced to onStep as it happens. */
@@ -330,9 +349,12 @@ export class SimpleAgent {
         rawResponse = await this.callComplete(messages);
       } catch (err: any) {
         if (err instanceof AbortError || this.signal?.aborted) { stopReason = "aborted"; break; }
-        const msg = err?.message || "LLM call failed";
-        errors.push(msg);
-        reasoning.push(`Step ${step + 1}: LLM error — ${msg}`);
+        // Raw provider text (JSON, status, billing/account detail) is for
+        // operators only — log it, and surface a sanitized message to the user.
+        console.error(`[agent] step ${step + 1} LLM error:`, err instanceof Error ? err.message : err);
+        const safe = userFacingLlmError(err);
+        errors.push(safe);
+        reasoning.push(`Step ${step + 1}: ${safe}`);
         stopReason = "error";
         break;
       }
@@ -599,9 +621,10 @@ export class SimpleAgent {
         response = await this.callCompleteWithTools!(messages, toolSpecs);
       } catch (err: any) {
         if (err instanceof AbortError || this.signal?.aborted) { stopReason = "aborted"; break; }
-        const msg = err?.message || "LLM call failed";
-        errors.push(msg);
-        reasoning.push(`Step ${step + 1}: LLM error — ${msg}`);
+        console.error(`[agent] step ${step + 1} LLM error:`, err instanceof Error ? err.message : err);
+        const safe = userFacingLlmError(err);
+        errors.push(safe);
+        reasoning.push(`Step ${step + 1}: ${safe}`);
         stopReason = "error";
         break;
       }
