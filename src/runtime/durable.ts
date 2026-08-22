@@ -42,17 +42,40 @@ export interface GraphStepHandlerConfig<S> {
  */
 export function createGraphStepHandler<S>(cfg: GraphStepHandlerConfig<S>): StepHandler {
   return async (req: InvokeRequest): Promise<InvokeResponse> => {
-    // Idempotency guard against at-least-once delivery. `graph.invoke()`
-    // auto-resumes ANY invoke whose thread has an interrupted checkpoint — so a
-    // RETRIED first-turn delivery (Temporal retries the step activity after a
-    // lost response / timeout, still `resume:false`) would walk straight
-    // through the approval gate and run the gated node with no human decision.
-    // When the driver is NOT explicitly resuming (`resume !== true`) but an
-    // interrupted checkpoint already exists, re-report that interrupt instead
-    // of invoking. Only an explicit resume (approval granted) advances the run.
-    if (req.resume !== true && typeof cfg.graph.getState === "function") {
+    // Idempotency guard against at-least-once delivery. Temporal retries the
+    // step activity after a lost response / timeout with the identical payload,
+    // so a turn's graph work can be delivered more than once. Two failure modes
+    // this guards, both driven off the persisted checkpoint:
+    //
+    //   1. A retried NON-resume (first-turn) delivery: `graph.invoke()`
+    //      auto-resumes any thread with an interrupted checkpoint, so without a
+    //      guard it would walk straight through the approval gate and run the
+    //      gated node with no human decision. Re-report the interrupt instead.
+    //
+    //   2. A retried delivery of a turn that already ran to a terminal stop
+    //      (complete / max_steps). The graph saves a NON-interrupted checkpoint
+    //      after each node, so a completed thread has a non-interrupted
+    //      checkpoint — and `graph.invoke()` would then fall through to a FRESH
+    //      run from the entry node, discarding all state and REPEATING the
+    //      turn's side effects (e.g. sending an email twice). This bites the
+    //      resume turn too (the one right after an approval), which is why it is
+    //      not gated on `resume`. Re-report the terminal result idempotently.
+    //
+    // Only an explicit resume of a still-interrupted checkpoint (approval
+    // granted) advances the run into new work.
+    if (typeof cfg.graph.getState === "function") {
       const cp = await cfg.graph.getState(req.run_id);
-      if (cp?.interrupted) {
+      if (cp && !cp.interrupted) {
+        // The thread already reached a terminal stop for a prior delivery of
+        // this turn. Return it as done — never re-execute from the entry node.
+        return {
+          output: cfg.toOutput(cp.state),
+          status: "complete",
+          done: true,
+          needs_approval: false,
+        };
+      }
+      if (cp?.interrupted && req.resume !== true) {
         const node = cp.currentNode ?? "";
         const isApproval = !cfg.approvalNodes || cfg.approvalNodes.includes(node);
         return {

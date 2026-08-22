@@ -176,6 +176,29 @@ describe("durable step contract over HTTP (worker loop semantics)", () => {
     expect(effects).toEqual({ draft: 1, approve: 1, send: 1 });
   });
 
+  it("a RETRIED resume turn does NOT re-execute the run from the entry node", async () => {
+    const checkpointer = new InMemoryCheckpointer<RunState>();
+    server = await serve(checkpointer, PORT + 6);
+
+    // Park at the gate, then resume once (approval granted) → run completes and
+    // the gated + send nodes each run exactly once.
+    const first = await invokeTurn(PORT + 6, "run-resume-retry", 0, "launch email");
+    expect(first.needs_approval).toBe(true);
+    const done = await invokeTurn(PORT + 6, "run-resume-retry", 1, "");
+    expect(done.done).toBe(true);
+    expect(effects).toEqual({ draft: 1, approve: 1, send: 1 });
+
+    // Temporal lost the resume turn's response and retries it (resume:true,
+    // identical payload). The run already completed, so its checkpoint is
+    // non-interrupted — the OLD code fell through to a fresh invoke from the
+    // entry node, re-running draft/approve/send and sending the email again.
+    // It must instead return the terminal result with NO further side effects.
+    const retry = await invokeTurn(PORT + 6, "run-resume-retry", 1, "");
+    expect(retry.done).toBe(true);
+    expect(retry.output).toBe("draft for launch email (approved) → sent");
+    expect(effects).toEqual({ draft: 1, approve: 1, send: 1 });
+  });
+
   it("an interrupt at a NON-approval node is not an approval pause", async () => {
     const checkpointer = new InMemoryCheckpointer<RunState>();
     server = await serveAgent({
