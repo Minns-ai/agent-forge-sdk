@@ -138,6 +138,16 @@ export interface PipelineState {
   /** Tool context for executing tools */
   toolContext: ToolContext;
   /**
+   * Runner bookkeeping: the conversation turns already written to graph memory
+   * this run. The tier that performs a write records it here so the finalize
+   * step writes only what is still outstanding — the alternative, re-deriving
+   * "did the graph tier already ingest?" at the finalize site, silently
+   * double-writes the moment either side changes.
+   *
+   * Not part of the middleware contract; middleware should not set it.
+   */
+  ingestedTurns?: Array<"user" | "assistant">;
+  /**
    * Private per-middleware state storage.
    * Each middleware stores its data under its own name key.
    * This prevents middlewares from accidentally colliding with each other

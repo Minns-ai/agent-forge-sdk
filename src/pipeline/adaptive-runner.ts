@@ -681,18 +681,19 @@ export class AdaptiveRunner {
     this.updateConversationHistory(sessionState, message, responseMessage);
 
     // ── Minns ingestion (non-blocking) ───────────────────────────────────
-    // The graph tier's semantic-write phase already ingested the user turn, so
-    // only the assistant turn is outstanding there; the agentic tier writes
-    // both. Each turn is tagged with its real role.
+    // Write whatever this run has not written yet, each turn tagged with its
+    // real role. A tier that already ingested a turn (the graph tier's
+    // semantic-write phase does) records it on pipelineState, so nothing is
+    // written twice regardless of which tier ran.
     if (this.client) {
-      const turns: Array<{ role: "user" | "assistant"; content: string }> =
-        tier === "graph"
-          ? [{ role: "assistant", content: responseMessage }]
-          : [
-              { role: "user", content: message },
-              { role: "assistant", content: responseMessage },
-            ];
-      this.ingestToMinns(sessionId, userId, ...turns).catch(() => {});
+      const alreadyIngested = new Set(pipelineState.ingestedTurns ?? []);
+      const turns: Array<{ role: "user" | "assistant"; content: string }> = [
+        { role: "user" as const, content: message },
+        { role: "assistant" as const, content: responseMessage },
+      ].filter((t) => !alreadyIngested.has(t.role));
+      if (turns.length) {
+        this.ingestToMinns(sessionId, userId, ...turns).catch(() => {});
+      }
     }
 
     // ── Build result ─────────────────────────────────────────────────────
@@ -1207,8 +1208,10 @@ export class AdaptiveRunner {
       timer.endPhase(`${memorySnapshot.claims.length} claims`);
 
       // Semantic write (non-blocking) — the USER turn only; the assistant turn
-      // is ingested by run() once the response exists.
+      // is ingested by run() once the response exists. Recorded on the state so
+      // finalize doesn't write it a second time.
       this.ingestToMinns(sessionId, userId, { role: "user", content: message }).catch(() => {});
+      pipelineState.ingestedTurns = [...(pipelineState.ingestedTurns ?? []), "user"];
     }
 
     // ── Step 2: Complexity Assessment (heuristic first, LLM fallback) ────
