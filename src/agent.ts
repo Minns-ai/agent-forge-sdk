@@ -177,25 +177,40 @@ export class AgentForge {
     const sessionState = await this.getOrCreateSession(sessionKey);
     const emitter = new AgentEventEmitter();
 
-    // Run pipeline in background, feeding events to the emitter
-    const pipelinePromise = this.runner.run(
-      message,
-      sessionState,
-      options.sessionId,
-      options.userId,
-      emitter,
-      controlsFrom(options),
-      options.attachments,
-    ).then(async () => {
-      await this.sessionStore!.set(sessionKey, sessionState);
-    });
+    // Run pipeline in background, feeding events to the emitter.
+    // The emitter MUST be completed even when the pipeline throws: the runner
+    // only calls complete() on its success path, so without this a throw
+    // anywhere in run() (e.g. a malformed tool definition while building tool
+    // specs) left the consumer's `for await` waiting on a promise that never
+    // settles — a permanently hung stream instead of an error.
+    const pipelinePromise = this.runner
+      .run(
+        message,
+        sessionState,
+        options.sessionId,
+        options.userId,
+        emitter,
+        controlsFrom(options),
+        options.attachments,
+      )
+      .then(async () => {
+        await this.sessionStore!.set(sessionKey, sessionState);
+      })
+      .finally(() => {
+        emitter.complete();
+      });
+
+    // Keep a rejection from surfacing as an unhandled rejection while we drain
+    // events; it is re-thrown by the await below, which stays the caller's
+    // error channel.
+    pipelinePromise.catch(() => {});
 
     // Yield events as they come
     for await (const event of emitter) {
       yield event;
     }
 
-    // Ensure pipeline completes
+    // Ensure pipeline completes (and surface any pipeline error to the caller)
     await pipelinePromise;
   }
 

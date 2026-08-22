@@ -681,8 +681,18 @@ export class AdaptiveRunner {
     this.updateConversationHistory(sessionState, message, responseMessage);
 
     // ── Minns ingestion (non-blocking) ───────────────────────────────────
+    // The graph tier's semantic-write phase already ingested the user turn, so
+    // only the assistant turn is outstanding there; the agentic tier writes
+    // both. Each turn is tagged with its real role.
     if (this.client) {
-      this.ingestToMinns(sessionId, userId, message, responseMessage).catch(() => {});
+      const turns: Array<{ role: "user" | "assistant"; content: string }> =
+        tier === "graph"
+          ? [{ role: "assistant", content: responseMessage }]
+          : [
+              { role: "user", content: message },
+              { role: "assistant", content: responseMessage },
+            ];
+      this.ingestToMinns(sessionId, userId, ...turns).catch(() => {});
     }
 
     // ── Build result ─────────────────────────────────────────────────────
@@ -938,14 +948,12 @@ export class AdaptiveRunner {
               errors.push(`stopped: a tool was called with identical arguments ${MAX_IDENTICAL_CALLS}x with no progress`);
               break;
             }
-            // Add assistant message with tool calls
-            messages.push({
-              role: "assistant",
-              content: response.content ?? "",
-              toolCalls: response.toolCalls,
-            });
-
-            // Hard cap on total tool executions for the run.
+            // Hard cap on total tool executions for the run. Checked BEFORE the
+            // assistant turn is pushed, for the same reason as the repetition
+            // guard above: breaking after the push would leave a dangling
+            // tool_use with no matching tool_result, and the wrap-up call on
+            // that transcript is rejected outright (400) by both Anthropic and
+            // OpenAI — turning a clean "hit the cap" into a failed run.
             if (
               controls?.maxToolCalls !== undefined &&
               allToolResults.length + response.toolCalls.length > controls.maxToolCalls
@@ -954,6 +962,13 @@ export class AdaptiveRunner {
               errors.push(`Tool-call cap reached (${controls.maxToolCalls}) — stopping`);
               break;
             }
+
+            // Add assistant message with tool calls
+            messages.push({
+              role: "assistant",
+              content: response.content ?? "",
+              toolCalls: response.toolCalls,
+            });
 
             // Execute this turn's tool calls with capability-aware scheduling:
             // parallel-safe (read-only) calls fan out concurrently, while a
@@ -1191,8 +1206,9 @@ export class AdaptiveRunner {
       }
       timer.endPhase(`${memorySnapshot.claims.length} claims`);
 
-      // Semantic write (non-blocking)
-      this.ingestToMinns(sessionId, userId, message).catch(() => {});
+      // Semantic write (non-blocking) — the USER turn only; the assistant turn
+      // is ingested by run() once the response exists.
+      this.ingestToMinns(sessionId, userId, { role: "user", content: message }).catch(() => {});
     }
 
     // ── Step 2: Complexity Assessment (heuristic first, LLM fallback) ────
@@ -1345,19 +1361,25 @@ export class AdaptiveRunner {
     }
   }
 
+  /**
+   * Write conversation turns into the knowledge graph. Each turn carries its
+   * OWN role: attributing the agent's reply to the user would let the agent's
+   * guesses come back as user-asserted facts on the next retrieval (memory
+   * self-contamination), so the role is never assumed here.
+   */
   private async ingestToMinns(
     sessionId: number,
     userId: string | undefined,
-    ...messages: string[]
+    ...turns: Array<{ role: "user" | "assistant"; content: string }>
   ): Promise<void> {
     if (!this.client?.sendMessage) return;
 
-    for (const content of messages) {
-      if (!content) continue;
+    for (const turn of turns) {
+      if (!turn?.content) continue;
       try {
         await this.client.sendMessage({
-          role: "user",
-          content,
+          role: turn.role,
+          content: turn.content,
           case_id: userId ?? `agent-${this.agentId}`,
           session_id: String(sessionId),
         });

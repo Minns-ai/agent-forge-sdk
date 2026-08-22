@@ -149,6 +149,11 @@ export class ToolRegistry {
     if (policy.decision === "deny") return { decision: "deny", reason: policy.reason };
     // A policy `ask` still lets the tool's own check tighten to a deny below,
     // but never loosens an ask back to allow.
+    // Track the ask DECISION separately from its reason string: inferring
+    // "needs approval" from the truthiness of the reason made a legal
+    // `{ ask: true, reason: "" }` collapse to `allow`, running a gated
+    // (possibly destructive) tool with no human in the loop.
+    let asked = policy.decision === "ask";
     let pending: string | undefined = policy.decision === "ask" ? policy.reason : undefined;
 
     if (tool.checkAccess) {
@@ -165,11 +170,15 @@ export class ToolRegistry {
         return { decision: "deny", reason: access.reason };
       }
       if ("ask" in access && access.ask) {
-        pending = access.reason;
+        asked = true;
+        // Keep a non-empty reason if the policy already supplied one.
+        pending = access.reason || pending;
       }
     }
 
-    return pending ? { decision: "ask", reason: pending } : { decision: "allow" };
+    return asked
+      ? { decision: "ask", reason: pending || "approval required" }
+      : { decision: "allow" };
   }
 
   /**
@@ -217,7 +226,7 @@ export class ToolRegistry {
     // 2. Authorization: policy + the tool's own access check.
     const auth = await this.authorize(name, params, context, opts);
     if (auth.decision === "deny") {
-      return { success: false, denied: true, error: auth.reason ?? "denied by policy" };
+      return { success: false, denied: true, error: auth.reason || "denied by policy" };
     }
     if (auth.decision === "ask") {
       const approver = opts?.onApprovalRequired;
@@ -249,9 +258,23 @@ export class ToolRegistry {
         const timeoutController = new AbortController();
         const signals: AbortSignal[] = [timeoutController.signal];
         if (context.signal) signals.push(context.signal);
-        const composite = signals.length > 1 && typeof (AbortSignal as any).any === "function"
-          ? (AbortSignal as any).any(signals) as AbortSignal
-          : signals[signals.length - 1];
+        let composite: AbortSignal;
+        if (signals.length > 1 && typeof (AbortSignal as any).any === "function") {
+          composite = (AbortSignal as any).any(signals) as AbortSignal;
+        } else {
+          // No AbortSignal.any on this runtime: forward the caller's abort into
+          // the timeout controller so ONE signal carries both. The old fallback
+          // returned the caller's signal alone, silently dropping the timeout
+          // backstop — a tool honouring context.signal never learned it fired.
+          if (context.signal) {
+            if (context.signal.aborted) timeoutController.abort();
+            else
+              context.signal.addEventListener("abort", () => timeoutController.abort(), {
+                once: true,
+              });
+          }
+          composite = timeoutController.signal;
+        }
         const execContext: ToolContext = { ...context, signal: composite };
 
         let timer: ReturnType<typeof setTimeout> | undefined;

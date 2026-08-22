@@ -34,6 +34,12 @@ export class AbortError extends Error {
   }
 }
 
+/** True for a cancellation — this SDK's {@link AbortError} or the runtime's
+ *  DOMException-style `AbortError` raised by an aborted fetch/signal. */
+export function isCancellation(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 /** Sleep that resolves after `ms`, or rejects with AbortError if `signal` fires.
  *  Use as `withRetry`'s `sleep` so a cancelled run stops mid-backoff. */
 export const abortableDelay = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -58,6 +64,12 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  * 4xx other than the rate/conflict codes above are treated as permanent.
  */
 export function isTransientError(error: unknown): boolean {
+  // A cancellation is NOT transient. Retrying it keeps hitting (and billing)
+  // the upstream for seconds after the caller gave up — and contradicts
+  // AbortError's own contract. Genuine timeouts stay retryable below: the
+  // providers map their timeout aborts to an LLMError ("timed out"), which is
+  // classified by the LLMError branch / the message matches.
+  if (isCancellation(error)) return false;
   if (error instanceof LLMError) {
     if (typeof error.status === "number") return RETRYABLE_STATUS.has(error.status);
     // No status → network/parse/timeout class error: retry.
@@ -67,7 +79,6 @@ export function isTransientError(error: unknown): boolean {
     const name = error.name.toLowerCase();
     const msg = error.message.toLowerCase();
     return (
-      name.includes("abort") ||
       name.includes("timeout") ||
       msg.includes("timed out") ||
       msg.includes("network") ||
