@@ -199,6 +199,32 @@ describe("durable step contract over HTTP (worker loop semantics)", () => {
     expect(effects).toEqual({ draft: 1, approve: 1, send: 1 });
   });
 
+  it("a checkpoint from a run that died MID-turn is not reported as done", async () => {
+    // The graph checkpoints after every node, so "not interrupted" alone cannot
+    // mean "finished" — it also describes a process that died mid-run. Only the
+    // explicit `completed` marker may short-circuit to done; otherwise the turn
+    // must still be executed rather than silently truncated.
+    const checkpointer = new InMemoryCheckpointer<RunState>();
+    await checkpointer.save("run-crashed", {
+      id: "cp-1",
+      threadId: "run-crashed",
+      state: { input: "launch email", result: "draft for launch email" },
+      currentNode: "draft",
+      interrupted: false,
+      // completed intentionally absent — mid-run, not finished.
+      stepCount: 1,
+      createdAt: new Date().toISOString(),
+      metadata: {},
+    });
+
+    server = await serve(checkpointer, PORT + 7);
+    const res = await invokeTurn(PORT + 7, "run-crashed", 0, "launch email");
+
+    // It must NOT claim the run finished off a mid-run checkpoint.
+    expect(res.status).not.toBe("complete");
+    expect(res.needs_approval).toBe(true);
+  });
+
   it("an interrupt at a NON-approval node is not an approval pause", async () => {
     const checkpointer = new InMemoryCheckpointer<RunState>();
     server = await serveAgent({

@@ -53,21 +53,28 @@ export function createGraphStepHandler<S>(cfg: GraphStepHandlerConfig<S>): StepH
     //      gated node with no human decision. Re-report the interrupt instead.
     //
     //   2. A retried delivery of a turn that already ran to a terminal stop
-    //      (complete / max_steps). The graph saves a NON-interrupted checkpoint
-    //      after each node, so a completed thread has a non-interrupted
-    //      checkpoint — and `graph.invoke()` would then fall through to a FRESH
-    //      run from the entry node, discarding all state and REPEATING the
+    //      (complete / max_steps). `graph.invoke()` auto-resumes only
+    //      INTERRUPTED threads, so for a finished one it would fall through to a
+    //      FRESH run from the entry node, discarding all state and REPEATING the
     //      turn's side effects (e.g. sending an email twice). This bites the
     //      resume turn too (the one right after an approval), which is why it is
     //      not gated on `resume`. Re-report the terminal result idempotently.
+    //
+    // A thread whose process died MID-turn is deliberately not covered here: its
+    // checkpoint asserts neither an interrupt nor completion, so it still falls
+    // through to invoke() and replays the turn (pre-existing behaviour).
     //
     // Only an explicit resume of a still-interrupted checkpoint (approval
     // granted) advances the run into new work.
     if (typeof cfg.graph.getState === "function") {
       const cp = await cfg.graph.getState(req.run_id);
-      if (cp && !cp.interrupted) {
+      if (cp?.completed) {
         // The thread already reached a terminal stop for a prior delivery of
         // this turn. Return it as done — never re-execute from the entry node.
+        // Gated on the checkpoint's explicit `completed` marker, NOT on
+        // "!interrupted": the graph checkpoints after every node, so
+        // "not interrupted" also describes a run whose process died mid-turn,
+        // and reporting that as done would silently truncate live work.
         return {
           output: cfg.toOutput(cp.state),
           status: "complete",

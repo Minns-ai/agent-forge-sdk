@@ -407,6 +407,7 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
         // Continue to the join node
         if (parallelEdge.then === END) {
           const duration_ms = Math.round(performance.now() - t0);
+          await this.saveTerminalCheckpoint(threadId, state, currentNode, stepCount, metadata);
           emitEvent({ type: "complete", status: "complete", duration_ms });
           return { state, status: "complete", threadId, stepCount, errors, duration_ms };
         }
@@ -420,6 +421,7 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
 
       if (nextNode === END) {
         const duration_ms = Math.round(performance.now() - t0);
+        await this.saveTerminalCheckpoint(threadId, state, currentNode, stepCount, metadata);
         emitEvent({ type: "complete", status: "complete", duration_ms });
 
         return {
@@ -437,6 +439,7 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
 
     // Exhausted maxSteps
     const duration_ms = Math.round(performance.now() - t0);
+    await this.saveTerminalCheckpoint(threadId, state, currentNode, stepCount, metadata);
     emitEvent({ type: "complete", status: "max_steps", duration_ms });
 
     return {
@@ -498,6 +501,7 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
     interruptType: "before" | "after" | undefined,
     stepCount: number,
     metadata: Record<string, unknown>,
+    completed = false,
   ): Checkpoint<S> {
     return {
       id: randomUUID(),
@@ -509,6 +513,30 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
       stepCount,
       createdAt: new Date().toISOString(),
       metadata,
+      completed,
     };
+  }
+
+  /**
+   * Record that a run reached a terminal state, so a later delivery of the same
+   * turn can tell "this finished" from "this died mid-run". Best-effort: a
+   * checkpointer failure here must not turn a successful run into a failed one.
+   */
+  private async saveTerminalCheckpoint(
+    threadId: string,
+    state: S,
+    currentNode: string,
+    stepCount: number,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.checkpointer) return;
+    try {
+      await this.checkpointer.save(
+        threadId,
+        this.makeCheckpoint(threadId, state, currentNode, false, undefined, stepCount, metadata, true),
+      );
+    } catch {
+      /* terminal bookkeeping only — never fail a completed run on it */
+    }
   }
 }
