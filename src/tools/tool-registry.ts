@@ -255,6 +255,12 @@ export class ToolRegistry {
     let result: ToolResult;
     try {
       if (timeoutMs > 0) {
+        // A run-scoped caller signal outlives this call, so any listener we add
+        // to it must be removed when the call finishes — otherwise a long
+        // agentic run accumulates one listener per tool call (retaining the
+        // closures, and eventually MaxListenersExceededWarning).
+        let forwardAbort: (() => void) | undefined;
+        let forwardFrom: AbortSignal | undefined;
         const timeoutController = new AbortController();
         const signals: AbortSignal[] = [timeoutController.signal];
         if (context.signal) signals.push(context.signal);
@@ -268,10 +274,11 @@ export class ToolRegistry {
           // backstop — a tool honouring context.signal never learned it fired.
           if (context.signal) {
             if (context.signal.aborted) timeoutController.abort();
-            else
-              context.signal.addEventListener("abort", () => timeoutController.abort(), {
-                once: true,
-              });
+            else {
+              forwardAbort = () => timeoutController.abort();
+              forwardFrom = context.signal;
+              forwardFrom.addEventListener("abort", forwardAbort, { once: true });
+            }
           }
           composite = timeoutController.signal;
         }
@@ -295,6 +302,9 @@ export class ToolRegistry {
           result = await Promise.race([tool.execute(params, execContext), timeout]);
         } finally {
           clearTimeout(timer);
+          if (forwardFrom && forwardAbort) {
+            forwardFrom.removeEventListener("abort", forwardAbort);
+          }
         }
       } else {
         result = await tool.execute(params, context);

@@ -68,18 +68,24 @@ export function createGraphStepHandler<S>(cfg: GraphStepHandlerConfig<S>): StepH
     // granted) advances the run into new work.
     if (typeof cfg.graph.getState === "function") {
       const cp = await cfg.graph.getState(req.run_id);
-      if (cp?.completed) {
+      if (cp?.terminal) {
         // The thread already reached a terminal stop for a prior delivery of
         // this turn. Return it as done — never re-execute from the entry node.
-        // Gated on the checkpoint's explicit `completed` marker, NOT on
+        // Gated on the checkpoint's explicit terminal marker, NOT on
         // "!interrupted": the graph checkpoints after every node, so
         // "not interrupted" also describes a run whose process died mid-turn,
         // and reporting that as done would silently truncate live work.
+        //
+        // The marker carries the original status and errors, so a replay
+        // reproduces the answer the first delivery produced instead of
+        // flattening a max_steps stop (or an errored run) into a clean
+        // "complete" — a distinction the durable worker acts on.
         return {
           output: cfg.toOutput(cp.state),
-          status: "complete",
+          status: cp.terminal.status,
           done: true,
           needs_approval: false,
+          ...(cp.terminal.errors?.length ? { errors: cp.terminal.errors } : {}),
         };
       }
       if (cp?.interrupted && req.resume !== true) {

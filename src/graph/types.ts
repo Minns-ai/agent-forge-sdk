@@ -111,18 +111,26 @@ export interface Checkpoint<S> {
   /** Whether the graph is paused at an interrupt point */
   interrupted: boolean;
   /**
-   * Whether the run REACHED A TERMINAL STATE (ran to END, or exhausted
+   * Set when the run REACHED A TERMINAL STATE (ran to END, or exhausted
    * maxSteps) at this checkpoint.
    *
-   * Without this, a non-interrupted checkpoint is ambiguous: the graph saves
-   * one after every node, so "not interrupted" describes both a finished run
-   * and a run whose process died mid-execution. Drivers that must decide
-   * whether re-delivering a turn should replay it or report the existing
-   * result (see runtime/durable.ts) need that distinction to be a fact, not an
-   * inference. Optional for backward compatibility: checkpoints written before
+   * Without it a non-interrupted checkpoint is ambiguous: the graph saves one
+   * after every node, so "not interrupted" describes both a finished run and a
+   * run whose process died mid-execution. Drivers deciding whether a
+   * re-delivered turn should replay or report the existing result (see
+   * runtime/durable.ts) need that to be a fact, not an inference.
+   *
+   * It carries the terminal `status` and any `errors` so a replay reproduces
+   * the original answer rather than flattening every finish to a clean
+   * "complete". Optional for backward compatibility: checkpoints written before
    * this field simply do not assert completion.
    */
-  completed?: boolean;
+  terminal?: {
+    /** How the run ended — distinguishes a clean finish from a step-budget stop. */
+    status: "complete" | "max_steps";
+    /** Non-fatal errors accumulated during the run, if any. */
+    errors?: string[];
+  };
   /** Where in the execution flow the interrupt occurred */
   interruptType?: "before" | "after";
   /** How many steps had been executed when this checkpoint was created */

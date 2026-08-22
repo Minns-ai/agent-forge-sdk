@@ -221,3 +221,49 @@ describe("minns ingestion", () => {
     expect(user.filter((m) => m.content === "what is my budget?")).toHaveLength(1);
   });
 });
+
+// ── 6. Tool execution must not leak listeners on a run-scoped signal ────────
+describe("tool execution abort wiring", () => {
+  it("removes its abort listener from the caller's signal after each call", async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      buildTool({
+        name: "quick",
+        description: "returns immediately",
+        effect: "read",
+        parameters: {},
+        async execute() {
+          return { success: true, result: { ok: true } };
+        },
+      }) as ToolDefinition,
+    );
+
+    // A run-scoped signal outlives individual tool calls, so listeners added
+    // per call must be removed — otherwise a long run accumulates one each.
+    const ac = new AbortController();
+    let live = 0;
+    const realAdd = ac.signal.addEventListener.bind(ac.signal);
+    const realRemove = ac.signal.removeEventListener.bind(ac.signal);
+    ac.signal.addEventListener = ((...args: Parameters<typeof realAdd>) => {
+      if (args[0] === "abort") live++;
+      return realAdd(...args);
+    }) as typeof realAdd;
+    ac.signal.removeEventListener = ((...args: Parameters<typeof realRemove>) => {
+      if (args[0] === "abort") live--;
+      return realRemove(...args);
+    }) as typeof realRemove;
+
+    // Force the no-AbortSignal.any fallback, which is the path that subscribes.
+    const anyFn = (AbortSignal as unknown as { any?: unknown }).any;
+    (AbortSignal as unknown as { any?: unknown }).any = undefined;
+    try {
+      for (let i = 0; i < 25; i++) {
+        await registry.execute("quick", {}, { sessionId: 1, signal: ac.signal } as never);
+      }
+    } finally {
+      (AbortSignal as unknown as { any?: unknown }).any = anyFn;
+    }
+
+    expect(live).toBe(0);
+  });
+});

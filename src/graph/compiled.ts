@@ -86,12 +86,20 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
           : this.resolveNextNode(checkpoint.currentNode, checkpoint.state); // already executed
 
         if (startNode === END) {
+          // Resuming lands straight on END: the run is finished here, so record
+          // it. Without this the thread keeps its INTERRUPTED checkpoint and a
+          // redelivery re-reports needs_approval for a completed run.
+          const errors: string[] = [];
+          await this.saveTerminalCheckpoint(
+            threadId, checkpoint.state, checkpoint.currentNode, checkpoint.stepCount,
+            metadata, { status: "complete" }, (m) => errors.push(m),
+          );
           return {
             state: checkpoint.state,
             status: "complete",
             threadId,
             stepCount: checkpoint.stepCount,
-            errors: [],
+            errors,
             duration_ms: 0,
           };
         }
@@ -147,6 +155,12 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
           ? checkpoint.currentNode
           : this.resolveNextNode(checkpoint.currentNode, checkpoint.state);
         if (nextNode === END) {
+          // Same terminal case as invoke() above — record it before returning.
+          await this.saveTerminalCheckpoint(
+            threadId, checkpoint.state, checkpoint.currentNode, checkpoint.stepCount,
+            metadata, { status: "complete" },
+            (m) => this.onEvent?.({ type: "error", node: checkpoint.currentNode, error: m }),
+          );
           yield { type: "complete", status: "complete", duration_ms: 0 };
           return;
         }
@@ -407,7 +421,11 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
         // Continue to the join node
         if (parallelEdge.then === END) {
           const duration_ms = Math.round(performance.now() - t0);
-          await this.saveTerminalCheckpoint(threadId, state, currentNode, stepCount, metadata);
+          await this.saveTerminalCheckpoint(
+            threadId, state, currentNode, stepCount, metadata,
+            { status: "complete", ...(errors.length ? { errors: [...errors] } : {}) },
+            (m) => { errors.push(m); emitEvent({ type: "error", node: currentNode, error: m }); },
+          );
           emitEvent({ type: "complete", status: "complete", duration_ms });
           return { state, status: "complete", threadId, stepCount, errors, duration_ms };
         }
@@ -421,7 +439,11 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
 
       if (nextNode === END) {
         const duration_ms = Math.round(performance.now() - t0);
-        await this.saveTerminalCheckpoint(threadId, state, currentNode, stepCount, metadata);
+        await this.saveTerminalCheckpoint(
+          threadId, state, currentNode, stepCount, metadata,
+          { status: "complete", ...(errors.length ? { errors: [...errors] } : {}) },
+          (m) => { errors.push(m); emitEvent({ type: "error", node: currentNode, error: m }); },
+        );
         emitEvent({ type: "complete", status: "complete", duration_ms });
 
         return {
@@ -439,7 +461,11 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
 
     // Exhausted maxSteps
     const duration_ms = Math.round(performance.now() - t0);
-    await this.saveTerminalCheckpoint(threadId, state, currentNode, stepCount, metadata);
+    await this.saveTerminalCheckpoint(
+      threadId, state, currentNode, stepCount, metadata,
+      { status: "max_steps", ...(errors.length ? { errors: [...errors] } : {}) },
+      (m) => { errors.push(m); emitEvent({ type: "error", node: currentNode, error: m }); },
+    );
     emitEvent({ type: "complete", status: "max_steps", duration_ms });
 
     return {
@@ -501,7 +527,7 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
     interruptType: "before" | "after" | undefined,
     stepCount: number,
     metadata: Record<string, unknown>,
-    completed = false,
+    terminal?: Checkpoint<S>["terminal"],
   ): Checkpoint<S> {
     return {
       id: randomUUID(),
@@ -513,14 +539,19 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
       stepCount,
       createdAt: new Date().toISOString(),
       metadata,
-      completed,
+      ...(terminal ? { terminal } : {}),
     };
   }
 
   /**
    * Record that a run reached a terminal state, so a later delivery of the same
-   * turn can tell "this finished" from "this died mid-run". Best-effort: a
-   * checkpointer failure here must not turn a successful run into a failed one.
+   * turn can tell "this finished" from "this died mid-run".
+   *
+   * A failure here does NOT fail the run (the work genuinely succeeded), but it
+   * is not silent either: without the marker a redelivery replays the turn from
+   * the entry node, repeating its side effects — the exact failure this
+   * mechanism exists to prevent. It is reported through `onFailure` so it lands
+   * in the run's `errors` and in the event stream.
    */
   private async saveTerminalCheckpoint(
     threadId: string,
@@ -528,15 +559,22 @@ export class CompiledGraph<S> implements GraphRuntime<S> {
     currentNode: string,
     stepCount: number,
     metadata: Record<string, unknown>,
+    terminal: NonNullable<Checkpoint<S>["terminal"]>,
+    onFailure?: (message: string) => void,
   ): Promise<void> {
     if (!this.checkpointer) return;
     try {
       await this.checkpointer.save(
         threadId,
-        this.makeCheckpoint(threadId, state, currentNode, false, undefined, stepCount, metadata, true),
+        this.makeCheckpoint(threadId, state, currentNode, false, undefined, stepCount, metadata, terminal),
       );
-    } catch {
-      /* terminal bookkeeping only — never fail a completed run on it */
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      onFailure?.(
+        `Failed to record run completion for thread "${threadId}": ${message}. ` +
+          `A redelivery of this turn will replay it instead of reporting the ` +
+          `existing result.`,
+      );
     }
   }
 }

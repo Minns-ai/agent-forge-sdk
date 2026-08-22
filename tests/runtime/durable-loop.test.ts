@@ -225,6 +225,31 @@ describe("durable step contract over HTTP (worker loop semantics)", () => {
     expect(res.needs_approval).toBe(true);
   });
 
+  it("a replayed terminal turn reproduces max_steps, not a clean complete", async () => {
+    // The marker carries the ORIGINAL terminal status. Flattening every replay
+    // to "complete" would silently undo the worker's max_steps distinction.
+    const checkpointer = new InMemoryCheckpointer<RunState>();
+    await checkpointer.save("run-budget", {
+      id: "cp-ms",
+      threadId: "run-budget",
+      state: { input: "x", result: "partial work" },
+      currentNode: "approve",
+      interrupted: false,
+      terminal: { status: "max_steps", errors: ["node \"send\" threw: boom"] },
+      stepCount: 9,
+      createdAt: new Date().toISOString(),
+      metadata: {},
+    });
+
+    server = await serve(checkpointer, PORT + 8);
+    const res = await invokeTurn(PORT + 8, "run-budget", 1, "");
+
+    expect(res.done).toBe(true);
+    expect(res.status).toBe("max_steps");
+    expect(res.errors).toEqual(['node "send" threw: boom']);
+    expect(effects).toEqual({}); // nothing re-executed
+  });
+
   it("an interrupt at a NON-approval node is not an approval pause", async () => {
     const checkpointer = new InMemoryCheckpointer<RunState>();
     server = await serveAgent({
