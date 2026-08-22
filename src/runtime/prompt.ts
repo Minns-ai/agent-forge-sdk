@@ -49,6 +49,19 @@ export async function fetchAgentPrompt(rails: MinnsRails): Promise<AgentPromptCo
   }
 }
 
+/** Whether two prompt configs represent the same active prompt. Prefers the
+ *  opaque version id when BOTH sides carry one; otherwise falls back to a
+ *  field-by-field compare so an un-versioned update is still detected. */
+function samePromptConfig(a: AgentPromptConfig, b: AgentPromptConfig): boolean {
+  if (a.version !== undefined && b.version !== undefined) return a.version === b.version;
+  return (
+    a.prompt === b.prompt &&
+    a.model === b.model &&
+    a.temperature === b.temperature &&
+    a.maxTokens === b.maxTokens
+  );
+}
+
 /**
  * Holds the agent's live prompt config and refreshes it from the control plane.
  * Use {@link current} on every run so the agent always uses the latest
@@ -82,12 +95,16 @@ export class PromptProvider {
   /** Fetch once now. Returns the new config, or the existing one on failure. */
   async refresh(): Promise<AgentPromptConfig | null> {
     const next = await fetchAgentPrompt(this.rails);
-    if (next && next.version !== this.config?.version) {
-      this.config = next;
-      this.onUpdate?.(next);
-    } else if (next && !this.config) {
-      this.config = next;
-    }
+    if (!next) return this.config;
+    // Always adopt what the control plane serves; decide separately whether it
+    // is a *change* worth notifying. Version is optional — when the control
+    // plane omits it (a nullable column, or a deployment that doesn't stamp
+    // versions), `next.version !== this.config?.version` is `undefined !==
+    // undefined` → false, and with a fallback set the old code discarded the
+    // fetched prompt forever, silently defeating the whole optimization loop.
+    const changed = this.config === null || !samePromptConfig(next, this.config);
+    this.config = next;
+    if (changed) this.onUpdate?.(next);
     return this.config;
   }
 
