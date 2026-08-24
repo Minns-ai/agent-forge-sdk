@@ -15,7 +15,7 @@ export type {
   ExecuteCandidateResponse,
 } from "./contract.js";
 
-export { readMinnsEnv, readMcpServersFromEnv } from "./env.js";
+export { readMinnsEnv, readMcpServersFromEnv, parseMinnsDsn } from "./env.js";
 export type { MinnsRails } from "./env.js";
 
 export {
