@@ -27,17 +27,56 @@ const clean = (v: string | undefined): string | undefined => {
 };
 
 /**
+ * Parse a single-value connect string (`MINNS_DSN`), Sentry-DSN style:
+ *
+ *   https://<ingest-token>@<control-plane-host>[/base-path]/<agent-id>
+ *
+ * The control plane hands this out at registration (and any time after, from
+ * the agent's Connect view); pasting the ONE value is the entire self-hosted
+ * setup. It expands into the full rail set — telemetry/logs/approval/prompt
+ * URLs under the control plane's `/api/agents/*`, plus token and agent id.
+ * Returns null for a missing or malformed DSN.
+ */
+export function parseMinnsDsn(dsn: string | undefined): MinnsRails | null {
+  const raw = clean(dsn);
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    const token = decodeURIComponent(u.username);
+    const segments = u.pathname.split("/").filter((s) => s.length > 0);
+    const agentId = segments.pop();
+    if (!token || !agentId) return null;
+    const basePath = segments.length ? `/${segments.join("/")}` : "";
+    const base = `${u.protocol}//${u.host}${basePath}`;
+    return {
+      telemetryUrl: `${base}/api/agents/telemetry`,
+      logsUrl: `${base}/api/agents/logs`,
+      approvalUrl: `${base}/api/agents/approval`,
+      promptUrl: `${base}/api/agents/prompt`,
+      token,
+      agentId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read the minns env rails from `process.env` (or a provided source for tests).
  * All fields are optional; a missing rail simply disables that egress.
+ *
+ * `MINNS_DSN` (one pasteable value) seeds every rail; any individually set
+ * `MINNS_*` variable then overrides its DSN-derived counterpart.
  */
 export function readMinnsEnv(env: NodeJS.ProcessEnv = process.env): MinnsRails {
+  const fromDsn = parseMinnsDsn(env.MINNS_DSN) ?? {};
   return {
-    telemetryUrl: clean(env.MINNS_TELEMETRY_URL),
-    logsUrl: clean(env.MINNS_LOGS_URL),
-    approvalUrl: clean(env.MINNS_APPROVAL_URL),
-    promptUrl: clean(env.MINNS_PROMPT_URL),
-    token: clean(env.MINNS_TELEMETRY_TOKEN),
-    agentId: clean(env.MINNS_AGENT_ID),
+    telemetryUrl: clean(env.MINNS_TELEMETRY_URL) ?? fromDsn.telemetryUrl,
+    logsUrl: clean(env.MINNS_LOGS_URL) ?? fromDsn.logsUrl,
+    approvalUrl: clean(env.MINNS_APPROVAL_URL) ?? fromDsn.approvalUrl,
+    promptUrl: clean(env.MINNS_PROMPT_URL) ?? fromDsn.promptUrl,
+    token: clean(env.MINNS_TELEMETRY_TOKEN) ?? fromDsn.token,
+    agentId: clean(env.MINNS_AGENT_ID) ?? fromDsn.agentId,
   };
 }
 
