@@ -9,6 +9,7 @@ describe("parseMinnsDsn", () => {
       logsUrl: "https://plane.minns.ai/api/agents/logs",
       approvalUrl: "https://plane.minns.ai/api/agents/approval",
       promptUrl: "https://plane.minns.ai/api/agents/prompt",
+      toolsUrl: "https://plane.minns.ai/api/agents/tools",
       token: "tok123",
       agentId: "inst-42",
     });
@@ -60,5 +61,25 @@ describe("readMinnsEnv with MINNS_DSN", () => {
     expect(rails.telemetryUrl).toBeUndefined();
     expect(rails.token).toBeUndefined();
     expect(rails.agentId).toBeUndefined();
+  });
+});
+
+describe("MINNS_DSN: tools rail", () => {
+  it("derives the tools endpoint alongside the others", () => {
+    const rails = parseMinnsDsn("https://tok-abc@cp.example.com/inst-42");
+    expect(rails?.toolsUrl).toBe("https://cp.example.com/api/agents/tools");
+  });
+
+  it("keeps a base path, so a control plane behind a prefix still resolves", () => {
+    const rails = parseMinnsDsn("https://tok@cp.example.com/minns/inst-42");
+    expect(rails?.toolsUrl).toBe("https://cp.example.com/minns/api/agents/tools");
+  });
+
+  it("lets an explicit MINNS_TOOLS_URL win over the DSN-derived one", () => {
+    const env = readMinnsEnv({
+      MINNS_DSN: "https://tok@cp.example.com/inst-42",
+      MINNS_TOOLS_URL: "https://override.example.com/tools",
+    });
+    expect(env.toolsUrl).toBe("https://override.example.com/tools");
   });
 });

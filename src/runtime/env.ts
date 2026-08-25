@@ -9,6 +9,7 @@
 //   MINNS_TELEMETRY_TOKEN  per-instance bearer for all three
 //   MINNS_AGENT_ID         the instance id; tags telemetry as minns.agent_id
 //   MINNS_PROMPT_URL       current (opto-optimized) prompt/model for this agent
+//   MINNS_TOOLS_URL        first-party agent tools (generative UI, images)
 
 import type { McpServerConfig } from "../tools/mcp/client.js";
 
@@ -17,6 +18,19 @@ export interface MinnsRails {
   logsUrl?: string;
   approvalUrl?: string;
   promptUrl?: string;
+  /**
+   * First-party agent tools hosted by the control plane — generative UI and
+   * image generation.
+   *
+   * A self-hosted agent brings its own model keys and does its own thinking,
+   * but these are capabilities it cannot reasonably reproduce: the generative
+   * UI endpoint owns the component-library schema, the system prompt generated
+   * from it, and the validate-and-repair round that keeps a program
+   * renderable. Deriving the rail from the DSN means an observed agent can use
+   * them with the credential it already has, instead of each one reimplementing
+   * a UI DSL it will get subtly wrong.
+   */
+  toolsUrl?: string;
   token?: string;
   agentId?: string;
 }
@@ -53,6 +67,7 @@ export function parseMinnsDsn(dsn: string | undefined): MinnsRails | null {
       logsUrl: `${base}/api/agents/logs`,
       approvalUrl: `${base}/api/agents/approval`,
       promptUrl: `${base}/api/agents/prompt`,
+      toolsUrl: `${base}/api/agents/tools`,
       token,
       agentId,
     };
@@ -75,6 +90,7 @@ export function readMinnsEnv(env: NodeJS.ProcessEnv = process.env): MinnsRails {
     logsUrl: clean(env.MINNS_LOGS_URL) ?? fromDsn.logsUrl,
     approvalUrl: clean(env.MINNS_APPROVAL_URL) ?? fromDsn.approvalUrl,
     promptUrl: clean(env.MINNS_PROMPT_URL) ?? fromDsn.promptUrl,
+    toolsUrl: clean(env.MINNS_TOOLS_URL) ?? fromDsn.toolsUrl,
     token: clean(env.MINNS_TELEMETRY_TOKEN) ?? fromDsn.token,
     agentId: clean(env.MINNS_AGENT_ID) ?? fromDsn.agentId,
   };
