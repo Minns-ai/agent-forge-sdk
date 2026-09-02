@@ -6,8 +6,11 @@ import type {
   ModelRequest,
   ModelResponse,
   NextFn,
+  ToolCall,
+  ToolNextFn,
+  ToolCallWrapper,
 } from "./types.js";
-import type { ToolDefinition, LLMProvider, LLMMessage } from "../types.js";
+import type { ToolDefinition, ToolResult, LLMProvider, LLMMessage } from "../types.js";
 
 /**
  * MiddlewareStack — composes multiple middlewares into a single execution pipeline.
@@ -88,6 +91,49 @@ export class MiddlewareStack {
    */
   get hasWrapModelCall(): boolean {
     return this.middlewares.some((mw) => typeof mw.wrapModelCall === "function");
+  }
+
+  /** True when at least one registered middleware wraps tool calls. */
+  get hasWrapToolCall(): boolean {
+    return this.middlewares.some((mw) => typeof mw.wrapToolCall === "function");
+  }
+
+  /**
+   * Build the onion-wrapped TOOL call for one run.
+   *
+   * Returns a wrapper the pipeline installs on the registry for the run's
+   * duration (via the run context). Same ordering as `wrapModelCall`: the
+   * first middleware is outermost. Every layer, and the terminal, is memoised
+   * per call so a layer that throws after calling `next` cannot make the tool
+   * (or an inner layer) run twice: the chain falls through to the result it
+   * already has.
+   *
+   * @param state - The pipeline state (passed to wrapToolCall for context)
+   * @param context - The middleware context
+   */
+  buildToolCall(state: PipelineState, context: MiddlewareContext): ToolCallWrapper {
+    const layers = this.middlewares.filter((mw) => typeof mw.wrapToolCall === "function");
+    return async (call: ToolCall, terminal: ToolNextFn): Promise<ToolResult> => {
+      const once = (fn: ToolNextFn): ToolNextFn => {
+        let ran: Promise<ToolResult> | null = null;
+        return (c) => (ran ??= fn(c));
+      };
+      let chain: ToolNextFn = once(terminal);
+      for (let i = layers.length - 1; i >= 0; i--) {
+        const mw = layers[i];
+        const next = chain;
+        chain = once(async (c: ToolCall): Promise<ToolResult> => {
+          try {
+            return await mw.wrapToolCall!(c, next, state, context);
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            state.errors.push(`Middleware "${mw.name}" wrapToolCall failed: ${message}`);
+            return next(c);
+          }
+        });
+      }
+      return chain(call);
+    };
   }
 
   /** Get names of all registered middlewares (in order) */

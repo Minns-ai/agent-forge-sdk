@@ -4,9 +4,25 @@ import type {
   ToolContext,
   ToolExecuteOptions,
   ToolAccess,
+  ToolFailureClass,
 } from "../types.js";
 import { evaluatePolicy, isLoaded, capResultSize } from "./tool.js";
 import { validateToolArgs } from "./schema-validator.js";
+
+/** One tool invocation as seen by the execute wrapper / middleware. */
+export interface ToolCall {
+  name: string;
+  params: Record<string, any>;
+  context: ToolContext;
+  opts?: ToolExecuteOptions;
+}
+
+/** Continue to the next layer (ultimately the registry's own execution). */
+export type ToolNextFn = (call: ToolCall) => Promise<ToolResult>;
+
+/** A layer around every tool call. Must resolve to a result; a throw is
+ *  treated as "skip this layer", never as a failed tool call. */
+export type ToolCallWrapper = (call: ToolCall, next: ToolNextFn) => Promise<ToolResult>;
 
 /**
  * Tool registry — register, look up, disclose, and safely execute tools.
@@ -183,9 +199,40 @@ export class ToolRegistry {
     context: ToolContext,
     opts?: ToolExecuteOptions,
   ): Promise<ToolResult> {
+    const wrapper = this.wrapper;
+    if (!wrapper) return this.executeDirect(name, params, context, opts);
+    // The terminal runs at most once per call, whatever the wrapper does: a
+    // wrapper that fails after the tool ran must not run a write tool twice.
+    let ran: Promise<ToolResult> | null = null;
+    const terminal: ToolNextFn = (c) =>
+      (ran ??= this.executeDirect(c.name, c.params, c.context, c.opts));
+    try {
+      return await wrapper({ name, params: params ?? {}, context, opts }, terminal);
+    } catch {
+      return ran ?? terminal({ name, params: params ?? {}, context, opts });
+    }
+  }
+
+  /**
+   * Install (or clear) the wrapper every `execute` call flows through. The
+   * pipeline installs one so middleware `wrapToolCall` hooks see every tool
+   * call from every phase without each phase knowing about middleware.
+   */
+  setExecuteWrapper(wrapper: ToolCallWrapper | null): void {
+    this.wrapper = wrapper;
+  }
+
+  private wrapper: ToolCallWrapper | null = null;
+
+  private async executeDirect(
+    name: string,
+    params: Record<string, any>,
+    context: ToolContext,
+    opts?: ToolExecuteOptions,
+  ): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) {
-      return { success: false, error: `Tool not found: ${name}` };
+      return { success: false, failure: "not_found", error: `Tool not found: ${name}` };
     }
 
     // 0. Structural argument validation against the declared schema. Catches
@@ -196,6 +243,7 @@ export class ToolRegistry {
     if (!argCheck.ok) {
       return {
         success: false,
+        failure: "invalid_arguments",
         error: `Invalid arguments for "${name}": ${argCheck.errors.join("; ")}. ` +
           "Fix the arguments and call the tool again.",
       };
@@ -206,18 +254,18 @@ export class ToolRegistry {
       try {
         const v = await tool.validate(params, context);
         if (!v.ok) {
-          return { success: false, error: v.error ?? `invalid input for "${name}"` };
+          return { success: false, failure: "invalid_input", error: v.error ?? `invalid input for "${name}"` };
         }
       } catch (err: any) {
         const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: `validation failed: ${message}` };
+        return { success: false, failure: "invalid_input", error: `validation failed: ${message}` };
       }
     }
 
     // 2. Authorization: policy + the tool's own access check.
     const auth = await this.authorize(name, params, context, opts);
     if (auth.decision === "deny") {
-      return { success: false, denied: true, error: auth.reason ?? "denied by policy" };
+      return { success: false, denied: true, failure: "denied", error: auth.reason ?? "denied by policy" };
     }
     if (auth.decision === "ask") {
       const approver = opts?.onApprovalRequired;
@@ -233,6 +281,7 @@ export class ToolRegistry {
         return {
           success: false,
           denied: true,
+          failure: "approval_required",
           error: auth.reason ?? "approval required and not granted",
         };
       }
@@ -278,12 +327,15 @@ export class ToolRegistry {
       }
     } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
-      return { success: false, error: message };
+      const failure: ToolFailureClass = /\(runaway backstop\)/.test(message) ? "timeout" : "error";
+      return { success: false, failure, error: message };
     }
 
     // 4. Bound the serialized result so one payload can't blow out context.
     const cap = tool.maxResultBytes ?? this.defaultMaxResultBytes;
-    return capResultSize(result, cap);
+    const bounded = capResultSize(result, cap);
+    if (!bounded.success && !bounded.failure) bounded.failure = "error";
+    return bounded;
   }
 
   /**

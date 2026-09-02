@@ -8,6 +8,7 @@ import type {
 import type { StepHandler } from "./durable.js";
 import { readMinnsEnv, type MinnsRails } from "./env.js";
 import { telemetryFromRails, type TelemetryReporter } from "./otlp.js";
+import { withRun } from "../utils/run-context.js";
 import { logShipperFromRails, type LogShipper } from "./logs.js";
 import {
   buildAgentCard,
@@ -157,7 +158,7 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
 
         let result: InvokeResponse;
         try {
-          result = await opts.handler(request);
+          result = await withRun(request.run_id, () => opts.handler(request));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logs?.log(`invoke error for run ${request.run_id}: ${message}`, "stderr");
@@ -305,7 +306,7 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
             resume: false,
           };
           try {
-            const result = await opts.handler(request);
+            const result = await withRun(request.run_id, () => opts.handler(request));
             sendJson(res, 200, completedTask(id, result.output, contextId));
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);

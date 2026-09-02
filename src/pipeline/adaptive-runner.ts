@@ -33,6 +33,7 @@ import { ToolRegistry } from "../tools/tool-registry.js";
 import { planToolBatches } from "../tools/tool.js";
 import { AgentEventEmitter } from "../events/emitter.js";
 import { MiddlewareStack } from "../middleware/stack.js";
+import { currentRun, ensureRun } from "../utils/run-context.js";
 
 // Reasoning engines
 import { MetaReasoner } from "../reasoning/meta-reasoner.js";
@@ -338,6 +339,13 @@ export class AdaptiveRunner {
 
     this.services = params.services ?? {};
     this.toolRegistry = new ToolRegistry();
+    // Route tool execution through whichever middleware onion the CURRENT run
+    // installed on its run context. Runs that installed none pass straight
+    // through, and two concurrent runs each see only their own layers.
+    this.toolRegistry.setExecuteWrapper((call, next) => {
+      const onion = currentRun()?.toolCall;
+      return onion ? onion(call, next) : next(call);
+    });
     this.toolRegistry.registerAll(params.tools);
 
     // Initialize middleware stack
@@ -483,6 +491,24 @@ export class AdaptiveRunner {
     controls?: RunControls,
     attachments?: ContentBlock[],
   ): Promise<PipelineResult> {
+    // Every run executes inside a run context: the harness may have named it
+    // (the control plane's run_id), otherwise it gets a fresh id. Telemetry
+    // keys spans on it and the tool registry finds this run's middleware
+    // onion through it, so concurrent runs on one agent never cross wires.
+    return ensureRun(() =>
+      this.runInContext(message, sessionState, sessionId, userId, emitter, controls, attachments),
+    );
+  }
+
+  private async runInContext(
+    message: string,
+    sessionState: SessionState,
+    sessionId: number,
+    userId?: string,
+    emitter?: AgentEventEmitter,
+    controls?: RunControls,
+    attachments?: ContentBlock[],
+  ): Promise<PipelineResult> {
     const timer = new PipelineTimer();
     const errors: string[] = [];
     const allReasoning: string[] = [];
@@ -570,6 +596,14 @@ export class AdaptiveRunner {
         pipelineState,
         middlewareContext,
       );
+    }
+
+    // Tool calls: the registry dispatches every execute() through the run's
+    // onion (installed on the run context, see the constructor), so every
+    // phase and reasoning engine is covered without knowing about middleware.
+    const run = currentRun();
+    if (run && this.middlewareStack.hasWrapToolCall) {
+      run.toolCall = this.middlewareStack.buildToolCall(pipelineState, middlewareContext);
     }
 
     // Wire the middleware onion into the NATIVE TOOL LOOP as well. Without

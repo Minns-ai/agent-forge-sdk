@@ -123,7 +123,29 @@ export interface ToolResult {
   /** Set when the call was refused by policy or a tool access check, as opposed
    *  to failing during execution. */
   denied?: boolean;
+  /** Why the call failed, classified by the registry at the boundary so
+   *  telemetry and optimisation can tell a prompt problem (wrong tool, bad
+   *  arguments) from an environment one (timeout, tool threw). Absent on
+   *  success. */
+  failure?: ToolFailureClass;
 }
+
+/** Registry-assigned failure classes for a tool call. */
+export type ToolFailureClass =
+  /** No tool of that name is registered: the model invented one. */
+  | "not_found"
+  /** Arguments did not match the declared schema. */
+  | "invalid_arguments"
+  /** The tool's own `validate` rejected the input. */
+  | "invalid_input"
+  /** Refused by policy or the tool's access check. */
+  | "denied"
+  /** Needed a human approval that was not granted. */
+  | "approval_required"
+  /** Hit the wall-clock backstop. */
+  | "timeout"
+  /** The tool threw or returned a failed result. */
+  | "error";
 
 /** Coarse, name-based permission policy evaluated in front of a tool's own
  *  `checkAccess`. Precedence: `deny` > `allow` > `ask` > destructive auto-ask. */

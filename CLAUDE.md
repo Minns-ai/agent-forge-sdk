@@ -86,8 +86,12 @@ src/
     durable.ts          — createGraphStepHandler: maps invoke/checkpoint/interrupt → step contract
     serve.ts            — serveAgent(): HTTP harness exposing /v1/invoke + /healthz
                           (+ /v1/execute-candidate when onExecuteCandidate is supplied)
+    prompt.ts           — fetchAgentPrompt / PromptProvider: the opto-optimised prompt, served back
+    trace-attrs.ts      — span vocabulary (gen_ai.* / minns.* keys, span names) opto and the control plane read
+    traced-provider.ts  — tracedProvider(): one llm.call span per provider call (messages, tools, output, tokens)
 
   utils/
+    run-context.ts      — AsyncLocalStorage run identity (rollout id, per-run tool onion, counters)
     timer.ts            — PipelineTimer: phase timing
     json.ts             — safeJsonParse, canonicalizeJson
     fingerprint.ts      — computeContextFingerprint
@@ -102,7 +106,12 @@ split into two decoupled tiers:
   tagged with the `minns.agent_id` resource attribute), `LogShipper`, and the
   HTTP approval handler. Driven by the env rails (`readMinnsEnv()`). This is the
   light, framework-agnostic tier — most value (cost/metrics/traces/evals) needs
-  only this, no durable runtime.
+  only this, no durable runtime. `tracedProvider()` + `TelemetryMiddleware`
+  (middleware/builtin/telemetry.ts) put the content on the spans: run input and
+  output, per-call messages and offered tools, per-tool arguments/result/failure
+  class, prompt version, all keyed on the run id from `utils/run-context.ts`
+  (`minns.rollout_id`, which opto groups a trajectory by). Middleware
+  `wrapToolCall` is the hook every `ToolRegistry.execute` flows through.
 - **Durable / "runs on us"** — `serveAgent({ handler })` exposes `POST /v1/invoke`
   (the contract in `contract.ts`). `createGraphStepHandler({ graph, ... })` adapts
   a compiled graph's `invoke()`/checkpoint/interrupt model onto it: each invoke is

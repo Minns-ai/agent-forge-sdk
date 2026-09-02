@@ -41,6 +41,7 @@ export type {
   LLMToolSpec,
   ToolSpecSchema,
   LLMToolCall,
+  ToolFailureClass,
   LLMToolResponse,
   SessionStore,
   SessionState,
@@ -252,6 +253,9 @@ export type { PromptCacheConfig } from "./middleware/builtin/prompt-cache.js";
 export { ToolResultEvictionMiddleware } from "./middleware/builtin/tool-result-eviction.js";
 export type { ToolResultEvictionConfig } from "./middleware/builtin/tool-result-eviction.js";
 export { ArgumentTruncationMiddleware } from "./middleware/builtin/argument-truncation.js";
+export { TelemetryMiddleware } from "./middleware/builtin/telemetry.js";
+export type { TelemetryMiddlewareConfig } from "./middleware/builtin/telemetry.js";
+export type { ToolCall, ToolNextFn, ToolCallWrapper } from "./tools/tool-registry.js";
 export type { ArgumentTruncationConfig } from "./middleware/builtin/argument-truncation.js";
 export { PatchToolCallsMiddleware } from "./middleware/builtin/patch-tool-calls.js";
 export { AsyncSubAgentMiddleware } from "./middleware/builtin/async-subagents.js";

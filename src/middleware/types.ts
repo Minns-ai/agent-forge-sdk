@@ -13,10 +13,12 @@ import type {
   AgentEvent,
   IntentState,
 } from "../types.js";
-import type { ToolRegistry } from "../tools/tool-registry.js";
+import type { ToolRegistry, ToolCall, ToolNextFn } from "../tools/tool-registry.js";
 import type { AgentEventEmitter } from "../events/emitter.js";
 import type { PipelineTimer } from "../utils/timer.js";
 import type { ComplexityAssessment, ReflexionContext } from "../reasoning/types.js";
+
+export type { ToolCall, ToolNextFn, ToolCallWrapper } from "../tools/tool-registry.js";
 
 // ─── Model Request / Response ────────────────────────────────────────────────
 
@@ -286,6 +288,30 @@ export interface Middleware {
     state: Readonly<PipelineState>,
     context: MiddlewareContext,
   ): Promise<ModelResponse>;
+
+  /**
+   * Wraps every tool call using the same onion model as `wrapModelCall`.
+   *
+   * Sees the call the model asked for (name, arguments) and the registry's
+   * result (success, payload, failure class), from every phase and reasoning
+   * engine, because the pipeline routes `ToolRegistry.execute` through this
+   * chain. Use for: telemetry, argument rewriting, result redaction, budgets.
+   *
+   * Does not affect streaming (only `wrapModelCall` does). A layer that throws
+   * is skipped; the tool itself runs at most once per call regardless.
+   *
+   * @param call - The tool call (name, params, context)
+   * @param next - Call this to continue to the next layer / the registry
+   * @param state - Current pipeline state (read-only recommended)
+   * @param context - Read-only middleware context
+   * @returns The tool result (possibly modified)
+   */
+  wrapToolCall?(
+    call: ToolCall,
+    next: ToolNextFn,
+    state: Readonly<PipelineState>,
+    context: MiddlewareContext,
+  ): Promise<ToolResult>;
 
   /**
    * Called once after the pipeline finishes executing (including response generation).

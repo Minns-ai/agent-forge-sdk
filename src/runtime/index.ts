@@ -38,6 +38,14 @@ export type { StepHandler, GraphStepHandlerConfig } from "./durable.js";
 export { fetchAgentPrompt, PromptProvider } from "./prompt.js";
 export type { AgentPromptConfig } from "./prompt.js";
 
+export { tracedProvider } from "./traced-provider.js";
+export type { SpanSink, TraceOptions } from "./traced-provider.js";
+export { TRACE_ATTRS, SPAN_RUN, SPAN_LLM, SPAN_TOOL } from "./trace-attrs.js";
+export type { ContentCapture } from "./trace-attrs.js";
+
+export { withRun, ensureRun, currentRun, currentRunId } from "../utils/run-context.js";
+export type { RunContext } from "../utils/run-context.js";
+
 export { serveAgent } from "./serve.js";
 export type { ServeAgentOptions, AgentServer } from "./serve.js";
 

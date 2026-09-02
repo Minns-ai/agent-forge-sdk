@@ -582,6 +582,7 @@ const agent = new AgentForge({
 | `PatchToolCallsMiddleware` | Fixes dangling tool calls from interrupted conversations |
 | `ToolResultEvictionMiddleware` | Replaces large tool results with summaries |
 | `ArgumentTruncationMiddleware` | Truncates old tool call arguments to save context |
+| `TelemetryMiddleware` | Records each run and every tool call as spans for the minns control plane (pair with `tracedProvider`) |
 
 ---
 
@@ -897,6 +898,41 @@ import {
   GraphError,            // graph execution engine failures
 } from "@minns/agent-forge";
 ```
+
+---
+
+## Observability on minns
+
+Set `MINNS_DSN` (from the agent's Connect tab) and wire two things: the traced
+provider records every LLM call, the telemetry middleware records the run and
+every tool call. Together they give the control plane a complete trajectory
+per run: input, output, the messages and tools offered on each model call, each
+tool's arguments, result and failure class, and the prompt version. That is
+what the optimiser improves your prompt against.
+
+```ts
+import {
+  AgentForge, AnthropicProvider, readMinnsEnv, telemetryFromRails,
+  PromptProvider, tracedProvider, TelemetryMiddleware,
+} from "@minns/agent-forge";
+
+const rails = readMinnsEnv();
+const telemetry = telemetryFromRails(rails);           // null when unconfigured
+const prompts = new PromptProvider(rails, { fallback: { prompt: MY_PROMPT, model: "claude-sonnet-5", temperature: 0.7, maxTokens: 2048 } });
+await prompts.start();
+
+const agent = new AgentForge({
+  directive: { identity: "support", goalDescription: prompts.current!.prompt },
+  llm: tracedProvider(new AnthropicProvider({ ... }), telemetry, { promptVersion: () => prompts.current?.version }),
+  tools,
+  middleware: [new TelemetryMiddleware({ telemetry, promptVersion: () => prompts.current?.version })],
+});
+```
+
+Neither piece changes behaviour: with no rails both are inert, and the
+middleware uses `wrapToolCall` (not `wrapModelCall`), so streaming stays on.
+Pass `captureContent: false` to send the skeleton only (names, models, tokens,
+failure classes) if message text must not leave the process.
 
 ---
 
