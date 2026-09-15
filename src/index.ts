@@ -207,6 +207,7 @@ export type { ArgValidationResult } from "./tools/schema-validator.js";
 export { PipelineTimer } from "./utils/timer.js";
 export { computeContextFingerprint } from "./utils/fingerprint.js";
 export { safeJsonParse, canonicalizeJson } from "./utils/json.js";
+export { noteFailure, noted, notedFallback } from "./utils/failure.js";
 
 // ─── Reasoning ──────────────────────────────────────────────────────────────
 export { MetaReasoner } from "./reasoning/meta-reasoner.js";

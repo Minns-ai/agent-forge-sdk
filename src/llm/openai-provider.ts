@@ -5,6 +5,7 @@ import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
 import { estimateTokens } from "../pipeline/context-compaction.js";
+import { noted, notedFallback } from "../utils/failure.js";
 
 /** Extract normalized usage from an OpenAI chat-completions payload. */
 function usageFromOpenAI(provider: string, model: string, payload: any): TokenUsage {
@@ -277,7 +278,7 @@ export class OpenAIProvider implements LLMProvider {
       });
 
       if (!response.ok) {
-        const body = await response.text().catch(() => "");
+        const body = await response.text().catch(notedFallback("", "openai-provider", "read the error body"));
         throw new LLMError(`LLM stream failed with status ${response.status}`, response.status, body);
       }
 
@@ -389,7 +390,7 @@ export class OpenAIProvider implements LLMProvider {
       });
 
       if (!response.ok) {
-        const body = await response.text().catch(() => "");
+        const body = await response.text().catch(notedFallback("", "openai-provider", "read the error body"));
         throw new LLMError(`LLM stream failed with status ${response.status}`, response.status, body);
       }
 
@@ -488,7 +489,7 @@ export class OpenAIProvider implements LLMProvider {
       // cleared the timeout. abort() + reader.cancel() actually stop it.
       // Both are no-ops once the stream finished normally.
       controller.abort();
-      if (reader) await reader.cancel().catch(() => {});
+      if (reader) await reader.cancel().catch(noted("openai-provider", "cancel the stream reader"));
       // Early return / failure: meter whatever the provider streamed. Only when
       // a body was actually opened — a request rejected before that (401, DNS,
       // pre-connect abort) was never billed and must not be charged.

@@ -20,6 +20,7 @@ import {
   type ContentCapture,
 } from "../../runtime/trace-attrs.js";
 import type { SpanSink } from "../../runtime/traced-provider.js";
+import { noted } from "../../utils/failure.js";
 
 // Records the run and its tool calls as spans. With `tracedProvider` on the
 // LLM this gives the control plane a complete trajectory: one `agent.run`
@@ -123,6 +124,6 @@ export class TelemetryMiddleware implements Middleware {
       attributes: attrs,
       ...(status === "error" ? { error: state.errors[0] ?? "run failed" } : {}),
     });
-    if (this.flushAfterRun) void this.sink.flush?.().catch(() => {});
+    if (this.flushAfterRun) void this.sink.flush?.().catch(noted("telemetry", "flush the sink"));
   }
 }

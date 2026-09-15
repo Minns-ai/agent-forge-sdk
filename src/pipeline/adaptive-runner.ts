@@ -53,6 +53,7 @@ import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
 import { defaultGoalChecker } from "./phases/goal-check-phase.js";
 import { compactMessages } from "./context-compaction.js";
 import { isContextLengthError, recoverContext, MAX_CONTEXT_RECOVERY } from "./context-recovery.js";
+import { noted } from "../utils/failure.js";
 
 // ─── Heuristic Router ─────────────────────────────────────────────────────────
 
@@ -716,7 +717,7 @@ export class AdaptiveRunner {
 
     // ── Minns ingestion (non-blocking) ───────────────────────────────────
     if (this.client) {
-      this.ingestToMinns(sessionId, userId, message, responseMessage).catch(() => {});
+      this.ingestToMinns(sessionId, userId, message, responseMessage).catch(noted("adaptive-runner", "ingest the exchange to minns"));
     }
 
     // ── Build result ─────────────────────────────────────────────────────
@@ -1226,7 +1227,7 @@ export class AdaptiveRunner {
       timer.endPhase(`${memorySnapshot.claims.length} claims`);
 
       // Semantic write (non-blocking)
-      this.ingestToMinns(sessionId, userId, message).catch(() => {});
+      this.ingestToMinns(sessionId, userId, message).catch(noted("adaptive-runner", "ingest the message to minns"));
     }
 
     // ── Step 2: Complexity Assessment (heuristic first, LLM fallback) ────

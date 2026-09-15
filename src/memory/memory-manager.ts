@@ -1,5 +1,6 @@
 import type { MemorySnapshot, PhaseRecord } from "../types.js";
 import { extractFactsFromClaims } from "./fact-extractor.js";
+import { notedFallback } from "../utils/failure.js";
 
 export interface MemoryRetrievalResult {
   snapshot: MemorySnapshot;
@@ -108,6 +109,6 @@ export class MemoryManager {
   }
 
   private async queryGraph(question: string): Promise<any> {
-    return this.client.query(question).catch(() => null);
+    return this.client.query(question).catch(notedFallback(null, "memory-manager", "query the graph"));
   }
 }
