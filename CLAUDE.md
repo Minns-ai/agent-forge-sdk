@@ -42,6 +42,10 @@ src/
   tools/
     tool.ts             — Capability layer: buildTool() (safe defaults), planToolBatches (concurrency), evaluatePolicy (allow/deny/ask), capResultSize
     tool-registry.ts    — ToolRegistry: register, disclose (loaded/deferred/search), authorize, safely execute tools (validate → authorize → execute → cap)
+    sandbox/
+      protocol.ts       — SandboxBackend: where a shell command runs (exec → stdout/stderr/exit/timedOut)
+      local-sandbox.ts  — LocalSandbox: /bin/sh inside one directory, own process group, time + output caps, no host secrets
+      http-sandbox.ts   — HttpSandbox: POST {base}/exec with a bearer; the smallest remote sandbox contract
     builtin/
       search-memories.ts  — searchMemoriesTool (searchClaims + query)
       store-fact.ts       — storeFactTool (sendMessage)
@@ -73,6 +77,14 @@ src/
   subagent/
     sub-agent.ts        — SubAgentRunner: spawn + execute child agents
     types.ts            — SubAgentDefinition, SubAgentResult, SubAgentTask
+
+  middleware/
+    builtin/
+      filesystem.ts     — FilesystemMiddleware: ls/glob/grep/read_file/write_file/edit_file over a BackendProtocol;
+                          read-before-edit via tools/safe-edit, large tool results offloaded to /.agent/results
+      shell.ts          — ShellMiddleware: `execute` over a SandboxBackend; shell-safety verdicts, destructive → ask,
+                          exit codes via command-semantics
+      (todo-list, skills, subagents, summarization, eviction, HITL, prompt-cache, telemetry, minns-power, ...)
 
   events/
     emitter.ts          — AgentEventEmitter: typed events, callback + async iterable

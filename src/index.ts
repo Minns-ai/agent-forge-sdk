@@ -251,6 +251,10 @@ export { TodoListMiddleware } from "./middleware/builtin/todo-list.js";
 export type { TodoItem, TodoState } from "./middleware/builtin/todo-list.js";
 export { PromptCacheMiddleware } from "./middleware/builtin/prompt-cache.js";
 export type { PromptCacheConfig } from "./middleware/builtin/prompt-cache.js";
+export { FilesystemMiddleware } from "./middleware/builtin/filesystem.js";
+export { ShellMiddleware } from "./middleware/builtin/shell.js";
+export type { ShellConfig } from "./middleware/builtin/shell.js";
+export type { FilesystemConfig } from "./middleware/builtin/filesystem.js";
 export { ToolResultEvictionMiddleware } from "./middleware/builtin/tool-result-eviction.js";
 export type { ToolResultEvictionConfig } from "./middleware/builtin/tool-result-eviction.js";
 export { ArgumentTruncationMiddleware } from "./middleware/builtin/argument-truncation.js";
@@ -298,6 +302,11 @@ export type {
 } from "./middleware/backend/protocol.js";
 export { StateBackend } from "./middleware/backend/state-backend.js";
 export { FilesystemBackend } from "./middleware/backend/filesystem-backend.js";
+export type { SandboxBackend, ExecRequest, ExecResult } from "./tools/sandbox/protocol.js";
+export { LocalSandbox } from "./tools/sandbox/local-sandbox.js";
+export type { LocalSandboxOptions } from "./tools/sandbox/local-sandbox.js";
+export { HttpSandbox } from "./tools/sandbox/http-sandbox.js";
+export type { HttpSandboxOptions } from "./tools/sandbox/http-sandbox.js";
 
 // ─── Graph Execution Engine ─────────────────────────────────────────────────
 export { AgentGraph } from "./graph/graph.js";

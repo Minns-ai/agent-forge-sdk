@@ -578,11 +578,36 @@ const agent = new AgentForge({
 | `VibeGraphMiddleware` | Natural language to executable multi-agent workflow graphs |
 | `SubAgentIsolationMiddleware` | Isolated sub-agents with fresh context windows |
 | `AsyncSubAgentMiddleware` | Background tasks: start, check, cancel, list |
+| `FilesystemMiddleware` | `ls` / `glob` / `grep` / `read_file` / `write_file` / `edit_file` over any backend; read-before-edit, unique-match edits, large results offloaded to a readable file |
+| `ShellMiddleware` | `execute` over a `SandboxBackend` (`LocalSandbox`, `HttpSandbox`); static safety check, destructive commands go to approval, exit codes interpreted |
 | `SkillsMiddleware` | Progressive disclosure: SKILL.md files loaded on demand |
 | `PatchToolCallsMiddleware` | Fixes dangling tool calls from interrupted conversations |
 | `ToolResultEvictionMiddleware` | Replaces large tool results with summaries |
 | `ArgumentTruncationMiddleware` | Truncates old tool call arguments to save context |
 | `TelemetryMiddleware` | Records each run and every tool call as spans for the minns control plane (pair with `tracedProvider`) |
+
+### A coding agent
+
+The file and shell tools are what a coding agent rests on. They run over a pluggable backend, so the same agent works on a checkout, an in-memory tree, or a remote sandbox.
+
+```typescript
+import { SimpleAgent, FilesystemMiddleware, ShellMiddleware, FilesystemBackend, LocalSandbox } from "@minns/agent-forge";
+
+const root = process.cwd();
+const agent = new SimpleAgent({
+  directive: { identity: "You are a careful software engineer", goalDescription: "Make the change asked for and prove it with the tests" },
+  llm,
+  middleware: [
+    new FilesystemMiddleware({ backend: new FilesystemBackend({ rootDir: root }) }),
+    new ShellMiddleware({ sandbox: new LocalSandbox({ rootDir: root }) }),
+  ],
+  // A destructive command (rm -rf, git push --force) is refused unless this
+  // approves it. Wire a prompt, a webhook, or HumanInTheLoopMiddleware.
+  onApprovalRequired: async (_tool, params, reason) => askThePerson(reason, params),
+});
+```
+
+`read_file` returns numbered lines in a bounded window; `edit_file` refuses an ambiguous match and refuses to edit a file the model has not read this turn; any tool result over 20k characters is written to `/.agent/results/` and the model is handed the path. `LocalSandbox` is a developer's own machine inside one directory, with a time and output cap and none of the host's secrets; it is not isolation. For an untrusted repository or a deployed agent use `HttpSandbox`, whose contract is one `POST /exec` route.
 
 ---
 
