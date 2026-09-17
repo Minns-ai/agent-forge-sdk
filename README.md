@@ -62,28 +62,10 @@ You can use all of this, or just the parts you need. An agent with no memory and
 
 ## Examples
 
-### Simple coding assistant (no memory, no middleware)
+### Simple coding assistant (no memory)
 
 ```typescript
-import { AgentForge, OpenAIProvider } from "@minns/agent-forge";
-import type { ToolDefinition } from "@minns/agent-forge";
-
-const runCode: ToolDefinition = {
-  name: "run_code",
-  description: "Execute a shell command and return stdout/stderr",
-  parameters: {
-    command: { type: "string", description: "Shell command to execute" },
-  },
-  async execute(params) {
-    const { execSync } = await import("child_process");
-    try {
-      const output = execSync(params.command, { encoding: "utf-8", timeout: 30_000 });
-      return { success: true, result: { stdout: output } };
-    } catch (err: any) {
-      return { success: false, error: err.stderr ?? err.message };
-    }
-  },
-};
+import { AgentForge, OpenAIProvider, ShellMiddleware, LocalSandbox } from "@minns/agent-forge";
 
 const agent = new AgentForge({
   directive: {
@@ -92,11 +74,14 @@ const agent = new AgentForge({
   },
   llm: new OpenAIProvider({ apiKey: process.env.OPENAI_KEY!, model: "gpt-4o-mini" }),
   agentId: 1,
-  tools: [runCode],
+  // `execute` runs in the current directory with a time and output cap and
+  // none of this process's secrets; a destructive command is refused unless
+  // an approver is wired (see "A coding agent" under Middleware).
+  middleware: [new ShellMiddleware({ sandbox: new LocalSandbox({ rootDir: process.cwd() }) })],
 });
 
 const result = await agent.runSimple("List all TypeScript files in src/ and count them");
-// Agent uses: run_code → "find src -name '*.ts' | wc -l"
+// Agent uses: execute → "find src -name '*.ts' | wc -l"
 // Returns: "There are 24 TypeScript files in the src/ directory."
 ```
 
@@ -573,7 +558,7 @@ const agent = new AgentForge({
 | `TodoListMiddleware` | `write_todos` / `get_todos` tools for structured task planning |
 | `HumanInTheLoopMiddleware` | Approval gates on specific tools with pluggable UI handlers |
 | `PromptCacheMiddleware` | Anthropic prompt cache control for stable prompt prefixes |
-| `MinnsFullPowerMiddleware` | Full minns data layer: tables, MinnsQL, subscriptions, graph, analytics, code |
+| `MinnsFullPowerMiddleware` | Full minns data layer: tables, MinnsQL, subscriptions, graph, analytics, code. `defer: true` keeps its two dozen schemas out of context until the model asks with `find_tools` |
 | `MultiAgentMiddleware` | Cross-terminal agent coordination via shared knowledge graph |
 | `VibeGraphMiddleware` | Natural language to executable multi-agent workflow graphs |
 | `SubAgentIsolationMiddleware` | Isolated sub-agents with fresh context windows |
@@ -591,12 +576,13 @@ const agent = new AgentForge({
 The file and shell tools are what a coding agent rests on. They run over a pluggable backend, so the same agent works on a checkout, an in-memory tree, or a remote sandbox.
 
 ```typescript
-import { SimpleAgent, FilesystemMiddleware, ShellMiddleware, FilesystemBackend, LocalSandbox } from "@minns/agent-forge";
+import { AgentForge, FilesystemMiddleware, ShellMiddleware, FilesystemBackend, LocalSandbox } from "@minns/agent-forge";
 
 const root = process.cwd();
-const agent = new SimpleAgent({
+const agent = new AgentForge({
   directive: { identity: "You are a careful software engineer", goalDescription: "Make the change asked for and prove it with the tests" },
   llm,
+  agentId: 1,
   middleware: [
     new FilesystemMiddleware({ backend: new FilesystemBackend({ rootDir: root }) }),
     new ShellMiddleware({ sandbox: new LocalSandbox({ rootDir: root }) }),
@@ -605,9 +591,25 @@ const agent = new SimpleAgent({
   // approves it. Wire a prompt, a webhook, or HumanInTheLoopMiddleware.
   onApprovalRequired: async (_tool, params, reason) => askThePerson(reason, params),
 });
+
+const result = await agent.runSimple("Add a --json flag to the CLI and cover it in the tests");
 ```
 
 `read_file` returns numbered lines in a bounded window; `edit_file` refuses an ambiguous match and refuses to edit a file the model has not read this turn; any tool result over 20k characters is written to `/.agent/results/` and the model is handed the path. `LocalSandbox` is a developer's own machine inside one directory, with a time and output cap and none of the host's secrets; it is not isolation. For an untrusted repository or a deployed agent use `HttpSandbox`, whose contract is one `POST /exec` route.
+
+### What a run costs before it starts
+
+Every request carries the system prompt and the offered tool schemas. Measured on the first request of a default agent (chars / 4, the estimate the summarizer budgets with):
+
+| Configuration | Tokens |
+|---|---|
+| Bare agent | 180 |
+| Todo tools | +312 |
+| Files + shell (7 tools) | 1,078 |
+| MinnsFullPower, all 24 tools loaded | 2,951 |
+| MinnsFullPower with `defer: true` | 680 |
+
+A tool marked `defer: true` is withheld until the model calls `find_tools` with keywords; only the matches are attached, for the rest of the run. `tests/pipeline/base-tokens.test.ts` pins these as budgets so they cannot grow without someone deciding they should.
 
 ---
 

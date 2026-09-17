@@ -47,7 +47,7 @@ const SYSTEM_PROMPT = `
 
 ## Shell
 
-You can run commands with \`execute\`. Commands run in a sandbox with a time limit; long output is cut in the middle. A destructive command asks for approval first. Prefer the file tools for reading and editing files; use the shell for building, testing, searching and git.`;
+\`execute\` runs in a sandbox with a time limit; long output is cut in the middle, and a destructive command asks for approval first. Use the file tools to read and edit; use the shell to build, test and run git.`;
 
 const asString = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
 

@@ -239,7 +239,7 @@ declares its capabilities:
   `planToolBatches`) and approval (destructive auto-asks unless allowlisted)
 - `validate(params)` — friendly input check (never throw; the registry surfaces the error)
 - `checkAccess(params)` — per-call allow/deny/ask
-- `defer` / `alwaysLoad` — progressive disclosure (hidden until `registry.search` / `find_tools`)
+- `defer` / `alwaysLoad` — progressive disclosure: a deferred schema is withheld from every model request until the model calls the synthetic `find_tools`; the AdaptiveRunner and SimpleAgent both keep a per-run disclosed set and refuse a deferred tool that has not been surfaced. `tests/pipeline/base-tokens.test.ts` budgets what a default agent costs before its first step
 - `tier: "inproc" | "sandbox" | "remote"` — first-party vs sandboxed/MCP tools
 
 `ToolRegistry.execute` runs validate → authorize (policy + checkAccess + approval) →

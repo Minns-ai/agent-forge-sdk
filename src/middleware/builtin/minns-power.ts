@@ -135,6 +135,15 @@ export interface MinnsFullPowerConfig {
    * Default: false (use tools explicitly instead)
    */
   autoEnrich?: boolean;
+  /**
+   * Keep every tool's schema out of the model's context until it asks for it
+   * with `find_tools`. All eight sets together are two dozen tools and about
+   * 2,000 tokens on every request; an agent that touches the graph once a
+   * conversation should not pay that on every turn. The system prompt still
+   * names the capability, so the model knows to look.
+   * Default: false.
+   */
+  defer?: boolean;
 }
 
 // ─── Tool Builders ───────────────────────────────────────────────────────────
@@ -143,7 +152,7 @@ function buildGraphTools(client: MinnsFullClient): ToolDefinition[] {
   return [
     {
       name: "graph_query",
-      description: "Ask a natural language question about the knowledge graph. Supports: finding neighbors, paths between entities, filtered traversals, subgraphs, temporal chains, rankings, similarity search, and aggregations.",
+      description: "Ask the knowledge graph a question in plain language: neighbours, paths, traversals, subgraphs, temporal chains, rankings, similarity, aggregates.",
       parameters: {
         question: { type: "string", description: "Natural language question about entities, relationships, or patterns" },
         limit: { type: "string", description: "Max results (default 20)", optional: true },
@@ -231,7 +240,7 @@ function buildTemporalTools(client: MinnsFullClient): ToolDefinition[] {
     },
     {
       name: "temporal_reachability",
-      description: "Find all entities reachable from a starting point within a time-ordered traversal. Shows what was affected by or connected to an entity over time.",
+      description: "Everything reachable from an entity in time order: what it touched or was touched by.",
       parameters: {
         source: { type: "string", description: "Source entity node ID" },
         max_hops: { type: "string", description: "Maximum traversal depth (default 5)", optional: true },
@@ -414,7 +423,7 @@ function buildTableTools(client: MinnsFullClient, groupId?: string): ToolDefinit
   return [
     {
       name: "table_create",
-      description: "Create a bi-temporal relational table. Supports column types: String, Int64, Float64, Bool, Timestamp, Json, NodeRef (links rows to graph nodes). Tables auto-track version history.",
+      description: "Create a bi-temporal table with version history. Column types: String, Int64, Float64, Bool, Timestamp, Json, NodeRef (a link to a graph node).",
       parameters: {
         name: { type: "string", description: "Table name" },
         columns: { type: "string", description: 'JSON array of column definitions. Each: { name, col_type, nullable?, primary_key? }. col_type: "String", "Int64", "Float64", "Bool", "Timestamp", "Json", "NodeRef"' },
@@ -551,7 +560,7 @@ function buildQueryTools(client: MinnsFullClient, groupId?: string): ToolDefinit
   return [
     {
       name: "minnsql_execute",
-      description: "Execute a MinnsQL query against the knowledge graph and temporal tables. Supports: MATCH (graph patterns), FROM (table scans), JOIN (graph-to-table), WHEN/AS OF (temporal), aggregations (count, sum, avg, min, max, collect), GROUP BY (must come BEFORE RETURN), ORDER BY, LIMIT, variable-length paths, and DDL/DML (CREATE TABLE, INSERT, UPDATE, DELETE).",
+      description: "Run a MinnsQL query: MATCH graph patterns, FROM tables, JOIN, WHEN/AS OF for time, aggregates, GROUP BY before RETURN, ORDER BY, LIMIT, and DDL/DML.",
       parameters: {
         query: { type: "string", description: 'MinnsQL query. IMPORTANT: GROUP BY comes BEFORE RETURN, not after. Examples: \'MATCH (a:Person)-[r:location]->(b) RETURN a.name, b.name\', \'FROM orders WHERE orders.status = "shipped" RETURN orders.customer\', \'FROM orders GROUP BY orders.region RETURN orders.region, sum(orders.amount) AS total\'' },
       },
@@ -587,7 +596,7 @@ function buildSubscriptionTools(
   return [
     {
       name: "subscription_create",
-      description: "Create a reactive MinnsQL subscription. Returns the initial result set and a subscription ID. The graph will track changes — poll for incremental inserts/deletes.",
+      description: "Subscribe to a MinnsQL query. Returns the initial rows and an id to poll for inserts and deletes.",
       parameters: {
         name: { type: "string", description: "A label for this subscription (for tracking)" },
         query: { type: "string", description: "MinnsQL query to subscribe to" },
@@ -748,6 +757,7 @@ function buildSubscriptionTools(
 export class MinnsFullPowerMiddleware implements Middleware {
   readonly name = "minns-full-power";
   readonly tools: ToolDefinition[];
+  private readonly deferred: boolean;
 
   private client: MinnsFullClient;
   private groupId?: string;
@@ -777,7 +787,8 @@ export class MinnsFullPowerMiddleware implements Middleware {
     if (enabledSets.has("query")) tools.push(...buildQueryTools(this.client, this.groupId));
     if (enabledSets.has("subscriptions")) tools.push(...buildSubscriptionTools(this.client, this.groupId, this.subscriptions));
 
-    this.tools = tools;
+    this.deferred = config.defer === true;
+    this.tools = this.deferred ? tools.map((t) => ({ ...t, defer: true })) : tools;
   }
 
   modifySystemPrompt(prompt: string, _state: Readonly<PipelineState>): string {
@@ -786,7 +797,9 @@ export class MinnsFullPowerMiddleware implements Middleware {
     let additions = "\n\n## Knowledge Graph\n\n" +
       "You have access to a graph-native knowledge engine with temporal reasoning, analytics, " +
       "relational tables, structured queries, and reactive subscriptions.\n\n" +
-      "**Available tools:** " + toolNames.join(", ") + "\n\n" +
+      (this.deferred
+        ? "**Tools:** " + toolNames.length + " graph tools are available; call find_tools with keywords to load the ones you need.\n\n"
+        : "**Available tools:** " + toolNames.join(", ") + "\n\n") +
       "Use these when you need to:\n" +
       "- Find relationships between entities\n" +
       "- Trace causal chains over time\n" +

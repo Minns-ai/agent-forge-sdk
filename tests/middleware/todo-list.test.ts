@@ -136,7 +136,7 @@ describe('TodoListMiddleware', () => {
     }, state.toolContext);
 
     const modified = mw.modifySystemPrompt!('Base prompt', state);
-    expect(modified).toContain('Task Planning');
+    expect(modified).toContain('Task planning');
     expect(modified).toContain('Write tests');
     expect(modified).toContain('PENDING');
   });

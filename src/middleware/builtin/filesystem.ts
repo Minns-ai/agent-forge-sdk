@@ -114,13 +114,13 @@ const SYSTEM_PROMPT = `
 
 ## Files
 
-You can read and search files with \`ls\`, \`glob\`, \`grep\` and \`read_file\`, and change them with \`write_file\` and \`edit_file\`. Paths are absolute. Read a file before you edit it; \`edit_file\` replaces one exact snippet and will refuse an ambiguous one, so include enough surrounding lines to make the target unique. A large result is saved to a file and you are given its path; read the part you need rather than asking for the whole thing again.`;
+Paths are absolute. Read a file before editing it; \`edit_file\` replaces one exact snippet and refuses an ambiguous one, so include enough context to make it unique. A large result is saved to a file and you are given its path: read the part you need.`;
 
 const SYSTEM_PROMPT_READ_ONLY = `
 
 ## Files
 
-You can read and search files with \`ls\`, \`glob\`, \`grep\` and \`read_file\`. Paths are absolute. A large result is saved to a file and you are given its path; read the part you need.`;
+Paths are absolute. A large result is saved to a file and you are given its path: read the part you need.`;
 
 /**
  * FilesystemMiddleware: file tools for the model over a pluggable backend.

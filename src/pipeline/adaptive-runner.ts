@@ -111,41 +111,32 @@ function buildAdaptiveSystemPrompt(params: {
   goalProgress: GoalProgress;
   tools: LLMToolSpec[];
   reflexionContext?: ReflexionContext;
+  /** Tools withheld from context until the model asks for them. */
+  deferredCount?: number;
 }): string {
-  const { directive, sessionState, claims, goalProgress, tools, reflexionContext } = params;
+  const { directive, sessionState, claims, goalProgress, tools, reflexionContext, deferredCount } = params;
 
   const parts: string[] = [];
 
   // Identity and goal
   parts.push(directive.identity);
   parts.push(`\nYour goal: ${directive.goalDescription}`);
+  if (deferredCount) {
+    parts.push(`\n${deferredCount} more tool${deferredCount === 1 ? " is" : "s are"} available but not attached: call find_tools with keywords to load what you need.`);
+  }
 
   // Behavior rules — promoted from the battle-tested native-tool prompt
   // (previously dead code on this default path): explicit work loop with a
   // verify step, error-recovery guidance, and anti-preamble rules.
   parts.push(`
-## Core Behavior
+## How to work
 
-- Be concise and direct. Don't over-explain unless asked.
-- NEVER add preamble ("Sure!", "Great question!", "I'll now..."). Just act.
-- If you can answer directly from context, do so without using tools.
-- If the request is ambiguous, ask questions before acting.
-- Keep working until the task is fully complete. Don't stop partway and explain what you would do — just do it.
-- Only yield back to the user when done or genuinely blocked.
-- Never re-ask for information the user already provided.
-
-## How to Work
-
-1. **Check what you know** — use the facts and memory below before reaching for tools.
-2. **Plan if complex** — think through multi-step tasks before acting.
-3. **Act** — use tools to accomplish the task. Independent read-only calls can be issued together.
-4. **Verify** — check your work against what was asked. Your first attempt is rarely correct — iterate.
-5. **Respond** — when done, give a concise summary of what you accomplished (or the answer itself).
-
-## When Things Go Wrong
-
-- If a tool fails repeatedly, stop and analyze WHY — don't retry the same call unchanged.
-- If you're blocked, say what's wrong and what you need — don't fabricate results.`);
+- Be direct. No preamble, no over-explaining, no re-asking for what was already given.
+- Answer from context when you can; ask before acting when the request is ambiguous.
+- Use what you already know, plan when the task is complex, then act. Independent read-only calls can go out together.
+- Verify against what was asked; a first attempt is rarely right.
+- Keep going until the task is complete or you are genuinely blocked. Then give a short summary, or the answer itself.
+- If a tool fails twice, stop and work out why rather than retrying unchanged. If blocked, say what is wrong and what you need; never fabricate a result.`);
 
   // Known facts
   const facts = sessionState.collectedFacts;
@@ -231,8 +222,36 @@ function toSpecSchema(schema: import("../types.js").ToolParameterSchema): import
   return out;
 }
 
-function buildToolSpecs(registry: ToolRegistry): LLMToolSpec[] {
-  return registry.definitions().map((tool: ToolDefinition) => ({
+/** The synthetic tool the model uses to pull a deferred tool into context.
+ *  Offered only while something is still deferred, and never executed as a
+ *  registry tool: the loop answers it directly. */
+const FIND_TOOLS_SPEC: LLMToolSpec = {
+  name: "find_tools",
+  description: "Load more tools by keyword before calling them.",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string", description: "keywords for the tool you need" } },
+    required: ["query"],
+  },
+};
+
+/** The names whose schemas are in the model's context right now: everything
+ *  not deferred, plus whatever find_tools has since surfaced. */
+function disclosedNames(registry: ToolRegistry): Set<string> {
+  return new Set(registry.loadedDefinitions().map((t) => t.name));
+}
+
+/**
+ * The tool specs to offer the model: the disclosed set, plus find_tools while
+ * any tool is still withheld. Progressive disclosure is a promise made in the
+ * ToolDefinition (`defer`), and until this took `disclosed` into account the
+ * default runner offered every tool on every request regardless, so the
+ * promise held only in SimpleAgent.
+ */
+function buildToolSpecs(registry: ToolRegistry, disclosed?: Set<string>): LLMToolSpec[] {
+  const all = registry.definitions();
+  const offered = disclosed ? all.filter((t) => disclosed.has(t.name)) : all;
+  const specs: LLMToolSpec[] = offered.map((tool: ToolDefinition) => ({
     name: tool.name,
     description: tool.description,
     parameters: {
@@ -245,6 +264,8 @@ function buildToolSpecs(registry: ToolRegistry): LLMToolSpec[] {
         .map(([name]) => name),
     },
   }));
+  if (disclosed && offered.length < all.length) specs.push(FIND_TOOLS_SPEC);
+  return specs;
 }
 
 // ─── AdaptiveRunner ───────────────────────────────────────────────────────────
@@ -615,7 +636,7 @@ export class AdaptiveRunner {
     if (!this.middlewareStack.isEmpty && this.llm.completeWithTools) {
       toolModelCallFn = this.middlewareStack.buildToolModelCall(
         this.llm,
-        buildToolSpecs(this.toolRegistry),
+        buildToolSpecs(this.toolRegistry, disclosedNames(this.toolRegistry)),
         pipelineState,
         middlewareContext,
       );
@@ -839,7 +860,11 @@ export class AdaptiveRunner {
   ): Promise<string> {
     timer.startPhase("agentic_loop");
 
-    const toolSpecs = buildToolSpecs(this.toolRegistry);
+    // Which schemas the model can see. Grows when it calls find_tools; the
+    // specs are rebuilt from it after every such call.
+    const disclosed = disclosedNames(this.toolRegistry);
+    let toolSpecs = buildToolSpecs(this.toolRegistry, disclosed);
+    const withheld = (): number => this.toolRegistry.definitions().filter((t) => !disclosed.has(t.name)).length;
     const toolContext: ToolContext = pipelineState.toolContext;
     const goalProgress = pipelineState.goalProgress;
 
@@ -854,6 +879,7 @@ export class AdaptiveRunner {
       goalProgress,
       tools: toolSpecs,
       reflexionContext: pipelineState.reflexionContext,
+      deferredCount: withheld(),
     });
 
     // Build conversation messages (system prompt will be modified by middleware below)
@@ -995,11 +1021,37 @@ export class AdaptiveRunner {
             // writer/destructive/unknown tool becomes a serial barrier so two
             // mutations never race. Results are processed in ORIGINAL order so
             // native tool_use/tool_result pairing stays valid regardless.
+            // find_tools is answered here, not by the registry: it changes what
+            // the model may see next turn. And a deferred tool the model has
+            // not surfaced is refused, so disclosure is a rule and not a hint.
+            const executed: Array<{ toolCall: (typeof response.toolCalls)[number]; toolResult: ToolResult }> = [];
+            const toRun: typeof response.toolCalls = [];
+            for (const tc of response.toolCalls) {
+              if (tc.name === FIND_TOOLS_SPEC.name) {
+                const query = String((tc.arguments as { query?: unknown })?.query ?? "");
+                const matches = this.toolRegistry.search(query).filter((t) => !disclosed.has(t.name));
+                for (const m of matches) disclosed.add(m.name);
+                toolSpecs = buildToolSpecs(this.toolRegistry, disclosed);
+                allReasoning.push(`find_tools("${query}"): ${matches.length} loaded`);
+                executed.push({
+                  toolCall: tc,
+                  toolResult: matches.length
+                    ? { success: true, result: `Loaded: ${matches.map((m) => m.name).join(", ")}. You can call them now.` }
+                    : { success: false, error: `No tools matched "${query}". Try other keywords.` },
+                });
+              } else if (this.toolRegistry.has(tc.name) && !disclosed.has(tc.name)) {
+                executed.push({
+                  toolCall: tc,
+                  toolResult: { success: false, error: `"${tc.name}" is not loaded. Call find_tools with keywords for it first.` },
+                });
+              } else {
+                toRun.push(tc);
+              }
+            }
             const batches = planToolBatches(
-              response.toolCalls,
+              toRun,
               (name) => this.toolRegistry.get(name),
             );
-            const executed: Array<{ toolCall: (typeof response.toolCalls)[number]; toolResult: ToolResult }> = [];
             for (const batch of batches) {
               const execOpts: ToolExecuteOptions | undefined =
                 this.toolPolicy || this.onApprovalRequired

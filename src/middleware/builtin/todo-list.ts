@@ -36,44 +36,25 @@ export interface TodoState {
 
 const TODO_SYSTEM_PROMPT = `
 
-## Task Planning
+## Task planning
 
-You have access to a structured task planning system via the \`write_todos\` and \`get_todos\` tools.
-
-**When to use task planning:**
-- When a task requires 3+ distinct steps
-- When you need to track progress on a complex objective
-- When tasks have dependencies (one must complete before another starts)
-- When the user provides multiple items to work through
-
-**How to use:**
-1. Break down the objective into clear, actionable tasks using \`write_todos\`
-2. Check progress with \`get_todos\` before deciding your next action
-3. Update task status as you complete work
-
-**Task lifecycle:**
-- Create tasks as "pending"
-- Set to "in_progress" when you start work
-- Set to "completed" when done
-- Use "cancelled" for tasks that are no longer needed
-
-Keep tasks focused and specific — each should represent a single unit of work.`;
+For work with three or more steps, or with dependencies, break it into tasks with \`write_todos\`, check \`get_todos\` before choosing the next step, and mark each task in_progress when you start it and completed when it is done. One unit of work per task.`;
 
 // ─── Tool Definitions ────────────────────────────────────────────────────────
 
 function createWriteTodosTool(getState: () => TodoState, setState: (s: TodoState) => void): ToolDefinition {
   return {
     name: "write_todos",
-    description: "Create, update, or manage a structured task list. Use for planning multi-step work.",
+    description: "Create, update or clear the task list for multi-step work.",
     parameters: {
       action: {
         type: "string",
-        description: 'The operation: "create" (add new items), "update" (modify existing item), "clear" (remove all items)',
+        description: "create, update or clear",
         enum: ["create", "update", "clear"],
       },
       items: {
         type: "string",
-        description: 'For "create": JSON array of {title, description, priority?, blockedBy?}. For "update": JSON object {id, status?, title?, description?, priority?}',
+        description: "create: JSON array of {title, description?, priority?, blockedBy?}. update: JSON {id, status?, title?, description?, priority?}",
         optional: true,
       },
     },
@@ -187,11 +168,11 @@ function createWriteTodosTool(getState: () => TodoState, setState: (s: TodoState
 function createGetTodosTool(getState: () => TodoState): ToolDefinition {
   return {
     name: "get_todos",
-    description: "Retrieve the current task list with status, dependencies, and progress summary.",
+    description: "The task list with status, dependencies and the next actionable item.",
     parameters: {
       filter: {
         type: "string",
-        description: 'Optional status filter: "all" (default), "pending", "in_progress", "completed", "active" (pending + in_progress)',
+        description: "all (default), pending, in_progress, completed or active",
         optional: true,
       },
     },
