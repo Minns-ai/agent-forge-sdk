@@ -2,7 +2,7 @@
 
 ## Overview
 
-TypeScript agent framework SDK. ESM-only, strict TypeScript, no default exports. Powered by `minns-sdk` (^0.7.2) as the optional memory layer. Ships an adaptive two-tier execution engine with reasoning engines, composable middleware, and a graph execution engine.
+TypeScript agent framework SDK. ESM-only, strict TypeScript, no default exports. Powered by `minns-sdk` (^0.8.6) as the optional memory layer. Ships an adaptive two-tier execution engine with reasoning engines, composable middleware, and a graph execution engine.
 
 ## Architecture
 
@@ -253,7 +253,7 @@ execute → result size-cap, and never throws.
 
 ## Important Notes
 
-- `minns-sdk` (^0.7.2) is a runtime dependency, `@anthropic-ai/sdk` is an optional peer dependency (lazy-loaded)
+- `minns-sdk` (^0.8.6) is a runtime dependency, `@anthropic-ai/sdk` is an optional peer dependency (lazy-loaded)
 - All imports between source files use `.js` extensions (Node16 module resolution)
 - The `dist/` directory is the only thing shipped to npm (plus `.claude/` for the skill)
 - Test suite lives in `tests/` (vitest); `npm test` runs it and publishing is gated on it
