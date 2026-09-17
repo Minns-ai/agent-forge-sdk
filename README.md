@@ -595,7 +595,19 @@ const agent = new AgentForge({
 const result = await agent.runSimple("Add a --json flag to the CLI and cover it in the tests");
 ```
 
-`read_file` returns numbered lines in a bounded window; `edit_file` refuses an ambiguous match and refuses to edit a file the model has not read this turn; any tool result over 20k characters is written to `/.agent/results/` and the model is handed the path. `LocalSandbox` is a developer's own machine inside one directory, with a time and output cap and none of the host's secrets; it is not isolation. For an untrusted repository or a deployed agent use `HttpSandbox`, whose contract is one `POST /exec` route.
+`read_file` returns numbered lines in a bounded window; `edit_file` refuses an ambiguous match and refuses to edit a file the model has not read this turn; any tool result over 20k characters is written to `/.agent/results/` and the model is handed the path. `LocalSandbox` is a developer's own machine inside one directory, with a time and output cap and none of the host's secrets; it is not isolation.
+
+For an untrusted repository or a deployed agent, the workspace lives on a remote box. `HttpSandbox` is both halves the agent needs, the shell and the tree, so hand the same instance to both middlewares and what the model edits is what its commands run against:
+
+```typescript
+const workspace = new HttpSandbox({ baseUrl: process.env.MINNS_SANDBOX_URL!, token: process.env.MINNS_SANDBOX_TOKEN! });
+middleware: [
+  new FilesystemMiddleware({ backend: workspace }),
+  new ShellMiddleware({ sandbox: workspace }),
+]
+```
+
+The box runs `serveSandbox({ rootDir: "/workspace", token })`, which is `LocalSandbox` and `FilesystemBackend` behind HTTP: a bearer checked in constant time, one command at a time, output streamed as it is produced, the command killed if the caller hangs up. The contract is in `runtime/sandbox-contract.ts` and is small enough to serve from any box of your own.
 
 ### What a run costs before it starts
 

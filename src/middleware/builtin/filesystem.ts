@@ -60,6 +60,7 @@ const ERROR_TEXT: Record<FileOperationError, string> = {
   invalid_path: "invalid path",
   already_exists: "already exists",
   parent_not_found: "parent directory does not exist",
+  backend_unavailable: "the workspace could not be reached; try again",
 };
 
 const explain = (path: string, err: FileOperationError): string => `${path}: ${ERROR_TEXT[err] ?? err}`;

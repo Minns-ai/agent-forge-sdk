@@ -146,11 +146,21 @@ export class LocalSandbox implements SandboxBackend {
         else request.signal.addEventListener("abort", onAbort, { once: true });
       }
 
+      const report = (stream: "stdout" | "stderr", chunk: Buffer) => {
+        if (!request.onOutput) return;
+        try {
+          request.onOutput(stream, chunk.toString("utf8"));
+        } catch {
+          // a listener that throws must not kill the command
+        }
+      };
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout = take(stdout, chunk);
+        report("stdout", chunk);
       });
       child.stderr?.on("data", (chunk: Buffer) => {
         stderr = take(stderr, chunk);
+        report("stderr", chunk);
       });
       child.on("error", (err) => {
         stderr += (stderr ? "\n" : "") + err.message;

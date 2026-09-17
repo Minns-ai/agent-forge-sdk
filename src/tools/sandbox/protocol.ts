@@ -18,6 +18,10 @@ export interface ExecRequest {
   env?: Record<string, string>;
   /** Cancels the command when aborted. */
   signal?: AbortSignal;
+  /** Called with output as it arrives, so a ten minute test run can be
+   *  watched rather than waited for. The final ExecResult still carries the
+   *  whole (capped) output. */
+  onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 
 export interface ExecResult {

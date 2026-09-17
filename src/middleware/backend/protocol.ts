@@ -19,7 +19,10 @@ export type FileOperationError =
   | "is_directory"
   | "invalid_path"
   | "already_exists"
-  | "parent_not_found";
+  | "parent_not_found"
+  /** A remote backend could not be reached or did not answer. Not a
+   *  statement about the file. */
+  | "backend_unavailable";
 
 export interface FileInfo {
   /** Absolute path to the file or directory */

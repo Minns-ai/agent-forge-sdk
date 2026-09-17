@@ -45,7 +45,8 @@ src/
     sandbox/
       protocol.ts       — SandboxBackend: where a shell command runs (exec → stdout/stderr/exit/timedOut)
       local-sandbox.ts  — LocalSandbox: /bin/sh inside one directory, own process group, time + output caps, no host secrets
-      http-sandbox.ts   — HttpSandbox: POST {base}/exec with a bearer; the smallest remote sandbox contract
+      http-sandbox.ts   — HttpSandbox: a remote workspace as BOTH halves the agent needs (SandboxBackend + BackendProtocol)
+                          over one base URL and token; streams /exec output, POSTs /fs/* for files
     builtin/
       search-memories.ts  — searchMemoriesTool (searchClaims + query)
       store-fact.ts       — storeFactTool (sendMessage)
@@ -101,6 +102,9 @@ src/
     prompt.ts           — fetchAgentPrompt / PromptProvider: the opto-optimised prompt, served back
     trace-attrs.ts      — span vocabulary (gen_ai.* / minns.* keys, span names) opto and the control plane read
     traced-provider.ts  — tracedProvider(): one llm.call span per provider call (messages, tools, output, tokens)
+    sandbox-contract.ts — the remote-workspace wire contract: /healthz, /exec (NDJSON stream of ExecEvent), /fs/*
+    sandbox-server.ts   — serveSandbox(): LocalSandbox + FilesystemBackend over one root behind HTTP; bearer in
+                          constant time, one command at a time (bounded queue), kill on client disconnect, body cap
 
   utils/
     run-context.ts      — AsyncLocalStorage run identity (rollout id, per-run tool onion, counters)
@@ -137,6 +141,14 @@ split into two decoupled tiers:
   runs. Omit the handler and the route 404s ("this agent has no candidates").
   serveAgent authenticates no inbound route — the deployment's token proxy
   fronts them all with one credential.
+- **Remote workspace** — `serveSandbox({ rootDir, token })` is what a sandbox
+  microVM runs (`runtime/sandbox-server.ts`, contract in `sandbox-contract.ts`).
+  It is `LocalSandbox` + `FilesystemBackend` behind HTTP, so local and remote
+  file/shell semantics are one implementation. `HttpSandbox` is the client and
+  implements both `SandboxBackend` and `BackendProtocol`: hand ONE instance to
+  `FilesystemMiddleware` and `ShellMiddleware` and the tree the model edits is
+  the tree its commands run in. Unlike serveAgent this server DOES authenticate:
+  a workspace with a shell is never open.
 
 ## Build & Dev Commands
 

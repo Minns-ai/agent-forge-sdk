@@ -306,6 +306,10 @@ export type { SandboxBackend, ExecRequest, ExecResult } from "./tools/sandbox/pr
 export { LocalSandbox } from "./tools/sandbox/local-sandbox.js";
 export type { LocalSandboxOptions } from "./tools/sandbox/local-sandbox.js";
 export { HttpSandbox } from "./tools/sandbox/http-sandbox.js";
+export { serveSandbox, createSandboxHandler } from "./runtime/sandbox-server.js";
+export type { SandboxServerOptions, SandboxServer } from "./runtime/sandbox-server.js";
+export type { ExecRequestBody, ExecEvent, SandboxHealth } from "./runtime/sandbox-contract.js";
+export { NDJSON } from "./runtime/sandbox-contract.js";
 export type { HttpSandboxOptions } from "./tools/sandbox/http-sandbox.js";
 
 // ─── Graph Execution Engine ─────────────────────────────────────────────────
