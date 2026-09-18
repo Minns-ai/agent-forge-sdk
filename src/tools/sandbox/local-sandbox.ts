@@ -26,7 +26,13 @@ export interface LocalSandboxOptions {
   shell?: string;
 }
 
-const INHERITED = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+// The proxy variables are part of a box's network, not a secret: a workspace
+// that routes outbound traffic through an allowlisting proxy sets them, and
+// git, npm, pip and curl honour them only when they reach the command.
+const INHERITED = [
+  "PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+];
 
 const inheritedEnv = (): Record<string, string> => {
   const out: Record<string, string> = {};

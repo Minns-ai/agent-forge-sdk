@@ -160,6 +160,19 @@ describe("LocalSandbox", () => {
     }
   });
 
+  it("passes the proxy variables through, since a box's network is not a secret", async () => {
+    process.env.HTTPS_PROXY = "http://127.0.0.1:3128";
+    process.env.AF_TEST_SECRET = "s3cr3t";
+    try {
+      const sb = new LocalSandbox({ rootDir: root });
+      const out = await sb.exec({ command: "echo \"[$HTTPS_PROXY][$AF_TEST_SECRET]\"" });
+      expect(out.stdout.trim()).toBe("[http://127.0.0.1:3128][]");
+    } finally {
+      delete process.env.HTTPS_PROXY;
+      delete process.env.AF_TEST_SECRET;
+    }
+  });
+
   it("stops when the run is aborted", async () => {
     const sb = new LocalSandbox({ rootDir: root });
     const controller = new AbortController();
