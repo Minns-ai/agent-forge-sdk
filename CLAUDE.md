@@ -85,6 +85,8 @@ src/
                           read-before-edit via tools/safe-edit, large tool results offloaded to /.agent/results
       shell.ts          — ShellMiddleware: `execute` over a SandboxBackend; shell-safety verdicts, destructive → ask,
                           exit codes via command-semantics
+      workspace.ts      — createWorkspace(): FilesystemMiddleware + ShellMiddleware over ONE HttpSandbox, from the
+                          MINNS_SANDBOX_URL/TOKEN rails by default (readWorkspaceEnv in runtime/env.ts); null without a box
       (todo-list, skills, subagents, summarization, eviction, HITL, prompt-cache, telemetry, minns-power, ...)
 
   events/
@@ -92,7 +94,8 @@ src/
 
   runtime/              — minns control-plane contract (deploy-time bridge)
     contract.ts         — InvokeRequest/InvokeResponse wire types + AGENT_ID_RESOURCE_ATTR
-    env.ts              — readMinnsEnv(): MINNS_TELEMETRY_URL/LOGS_URL/APPROVAL_URL/TOKEN/AGENT_ID
+    env.ts              — readMinnsEnv(): MINNS_TELEMETRY_URL/LOGS_URL/APPROVAL_URL/TOKEN/AGENT_ID;
+                          readWorkspaceEnv(): MINNS_SANDBOX_URL/TOKEN
     otlp.ts             — TelemetryReporter: OTLP/JSON GenAI span exporter (light "observed" tier)
     logs.ts             — LogShipper: batched log shipping to MINNS_LOGS_URL
     approval.ts         — createHttpApprovalHandler: HITL → control-plane approval queue

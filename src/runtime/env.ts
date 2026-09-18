@@ -10,6 +10,8 @@
 //   MINNS_AGENT_ID         the instance id; tags telemetry as minns.agent_id
 //   MINNS_PROMPT_URL       current (opto-optimized) prompt/model for this agent
 //   MINNS_TOOLS_URL        first-party agent tools (generative UI, images)
+//   MINNS_SANDBOX_URL      the agent's remote workspace (runtime/sandbox-contract.ts)
+//   MINNS_SANDBOX_TOKEN    the workspace's own bearer
 
 import type { McpServerConfig } from "../tools/mcp/client.js";
 
@@ -137,4 +139,30 @@ export function readMcpServersFromEnv(env: NodeJS.ProcessEnv = process.env): Mcp
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     },
   ];
+}
+
+/** The remote workspace a deploy hands an agent, when it has one. */
+export interface WorkspaceEnv {
+  /** Base URL of a server speaking runtime/sandbox-contract.ts. */
+  url: string;
+  token: string;
+}
+
+/**
+ * Read the workspace rails. The control plane injects both at deploy when
+ * the agent's definition names a workspace; a self-hosted agent sets them by
+ * hand. A URL without a token is refused, since a workspace with a shell is
+ * never open, and the refusal is a null so the agent runs without one.
+ */
+export function readWorkspaceEnv(env: NodeJS.ProcessEnv = process.env): WorkspaceEnv | null {
+  const url = clean(env.MINNS_SANDBOX_URL);
+  const token = clean(env.MINNS_SANDBOX_TOKEN);
+  if (!url || !token) return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  } catch {
+    return null;
+  }
+  return { url: url.replace(/\/+$/, ""), token };
 }
