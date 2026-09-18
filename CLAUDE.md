@@ -87,6 +87,12 @@ src/
                           exit codes via command-semantics
       workspace.ts      — createWorkspace(): FilesystemMiddleware + ShellMiddleware over ONE HttpSandbox, from the
                           MINNS_SANDBOX_URL/TOKEN rails by default (readWorkspaceEnv in runtime/env.ts); null without a box
+      code-mode.ts      — CodeModeMiddleware: programmatic tool calling. `run_code` runs a JavaScript program in a
+                          QuickJS sandbox (no host access) where tools.<name>(args) calls a disclosed tool through
+                          ToolRegistry.execute (validate/authorize/approval/cap all apply); synchronous from the
+                          script's side (asyncify), await/async stripped; deadline, memory cap, call budget, output
+                          cap; one runtime per middleware, a context per script (freeing a runtime that holds
+                          asyncified host refs crashes). quickjs-emscripten is an optional peer, loaded on first use
       (todo-list, skills, subagents, summarization, eviction, HITL, prompt-cache, telemetry, minns-power, ...)
 
   events/
@@ -268,7 +274,7 @@ execute → result size-cap, and never throws.
 
 ## Important Notes
 
-- `minns-sdk` (^0.8.6) is a runtime dependency, `@anthropic-ai/sdk` is an optional peer dependency (lazy-loaded)
+- `minns-sdk` (^0.8.6) is a runtime dependency; `@anthropic-ai/sdk` and `quickjs-emscripten` are optional peer dependencies (lazy-loaded)
 - All imports between source files use `.js` extensions (Node16 module resolution)
 - The `dist/` directory is the only thing shipped to npm (plus `.claude/` for the skill)
 - Test suite lives in `tests/` (vitest); `npm test` runs it and publishing is gated on it

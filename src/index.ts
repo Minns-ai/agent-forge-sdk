@@ -254,6 +254,8 @@ export type { PromptCacheConfig } from "./middleware/builtin/prompt-cache.js";
 export { FilesystemMiddleware } from "./middleware/builtin/filesystem.js";
 export { ShellMiddleware } from "./middleware/builtin/shell.js";
 export { createWorkspace } from "./middleware/builtin/workspace.js";
+export { CodeModeMiddleware, prepareScript } from "./middleware/builtin/code-mode.js";
+export type { CodeModeConfig } from "./middleware/builtin/code-mode.js";
 export type { WorkspaceOptions, Workspace } from "./middleware/builtin/workspace.js";
 export type { ShellConfig } from "./middleware/builtin/shell.js";
 export type { FilesystemConfig } from "./middleware/builtin/filesystem.js";

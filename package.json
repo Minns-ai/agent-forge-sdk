@@ -34,15 +34,20 @@
     "minns-sdk": "^0.8.6"
   },
   "peerDependencies": {
-    "@anthropic-ai/sdk": ">=0.20.0"
+    "@anthropic-ai/sdk": ">=0.20.0",
+    "quickjs-emscripten": ">=0.31.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "quickjs-emscripten": {
       "optional": true
     }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "quickjs-emscripten": "^0.32.0",
     "rimraf": "^5.0.0",
     "typescript": "^5.8.3",
     "vitest": "^4.1.10"
