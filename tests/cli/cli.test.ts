@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { run, parseArgs } from "../../src/cli/commands.js";
 import { readConfig } from "../../src/cli/config.js";
 
@@ -46,6 +47,8 @@ beforeAll(async () => {
       }
       if (p === "/control/sandboxes" && req.method === "POST") return json(201, { sandbox_id: "sbx_1", name: body.name ?? "workspace", status: "provisioning", memory_mb: body.memoryMb ?? 1024, credits_per_hour: 4 });
       if (p === "/control/sandboxes/sbx_1/credential") return json(200, { url: "https://minns.ai/v1/sandboxes/sbx_1", token: "wk_1" });
+      if (p === "/control/tools" && req.method === "GET") return json(200, { tools: [{ tool_id: "tool_1", name: "get_users", description: "", url: "https://minns.ai/v1/tools/tool_1/mcp", status: "running" }] });
+      if (p === "/control/tools" && req.method === "POST") return json(201, { tool_id: `tool_${body.name}` });
       if (p === "/control/account/tokens") return json(200, { tokens: [{ name: "laptop", hint: "mpt_aaaaaa", created_at: 1_700_000_000_000, last_used_at: null }] });
       if (p === "/control/billing/credits") return json(200, { balance_credits: 812.5 });
       if (p === "/control/billing/usage") return json(200, { graph: { nodes: 1200, capacity: 100000 }, meters: { messages: { used: 40, included: 2000, rate: 0.25 } } });
@@ -167,6 +170,41 @@ describe("the CLI", () => {
     expect(r.err[0]).toMatch(/revoked/);
     const ok = await exec(["whoami"], { MINNS_TOKEN: TOKEN, MINNS_URL: url });
     expect(ok.out).toEqual(["dev@example.com (pro)"]);
+  });
+
+  it("scans a tree and registers the routes against a base URL and the commands in a workspace", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "minns-scan-"));
+    mkdirSync(join(repo, "src"));
+    mkdirSync(join(repo, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(repo, "src", "app.ts"), `app.get("/users/:id", f);
+app.post("/users", g);
+`);
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    writeFileSync(join(repo, "node_modules", "dep", "x.js"), `app.get("/nope", f)`);
+
+    const dry = await exec(["tools", "scan", repo]);
+    expect(dry.code).toBe(0);
+    expect(dry.out[0]).toMatch(/files scanned, 3 candidates/);
+    expect(dry.out.join("\n")).toContain("get_users_by_id");
+    expect(dry.out.join("\n")).toContain("npm_run_test");
+    expect(dry.out.join("\n")).not.toContain("nope");
+    expect(seen.filter((s) => s.path === "/control/tools")).toHaveLength(0);
+
+    const reg = await exec(["tools", "scan", repo, "--register", "--base-url", "https://api.example.com", "--workspace", "sbx_1", "--api-key", "k"]);
+    expect(reg.code).toBe(0);
+    const posts = seen.filter((s) => s.path === "/control/tools" && s.method === "POST").map((s) => s.body as { name: string; secrets: Record<string, string>; egressHosts: string[] });
+    expect(posts.map((b) => b.name).sort()).toEqual(["get_users_by_id", "npm_run_test", "post_users"]);
+    expect(posts.find((b) => b.name === "post_users")!.secrets).toEqual({ BASE_URL: "https://api.example.com", API_KEY: "k" });
+    expect(posts.find((b) => b.name === "npm_run_test")!.secrets).toEqual({ MINNS_SANDBOX_URL: "https://minns.ai/v1/sandboxes/sbx_1", MINNS_SANDBOX_TOKEN: "wk_1" });
+    expect(posts.find((b) => b.name === "npm_run_test")!.egressHosts).toEqual(["minns.ai"]);
+    expect(reg.out.join("\n")).toContain("ok tool_post_users");
+
+    const only = await exec(["tools", "scan", repo, "--register", "--only", "script"]);
+    expect(only.code).toBe(2);
+    expect(only.err[0]).toMatch(/--workspace/);
+
+    const list = await exec(["tools", "list"]);
+    expect(list.out[2]).toMatch(/tool_1\s+get_users\s+running/);
   });
 
   it("logout clears the file", async () => {

@@ -255,6 +255,8 @@ export { FilesystemMiddleware } from "./middleware/builtin/filesystem.js";
 export { ShellMiddleware } from "./middleware/builtin/shell.js";
 export { createWorkspace } from "./middleware/builtin/workspace.js";
 export { CodeModeMiddleware, prepareScript } from "./middleware/builtin/code-mode.js";
+export { scanFiles, scannable, nameForRoute, normalisePath, generateTool, httpToolCode, scriptToolCode } from "./scan/index.js";
+export type { ScannedFile, ToolCandidate, CandidateKind, GeneratedTool, HttpTarget, WorkspaceTarget } from "./scan/index.js";
 export type { CodeModeConfig } from "./middleware/builtin/code-mode.js";
 export type { WorkspaceOptions, Workspace } from "./middleware/builtin/workspace.js";
 export type { ShellConfig } from "./middleware/builtin/shell.js";

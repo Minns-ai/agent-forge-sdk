@@ -115,11 +115,19 @@ src/
     sandbox-server.ts   — serveSandbox(): LocalSandbox + FilesystemBackend over one root behind HTTP; bearer in
                           constant time, one command at a time (bounded queue), kill on client disconnect, body cap
 
+  scan/                 — scan-to-register. scanner.ts (pure): OpenAPI JSON, Express/Hono/Fastify and
+    scanner.ts            FastAPI/Flask route literals, package.json scripts, Makefile targets -> ToolCandidate[]
+    codegen.ts            (name, schema, where from), deduplicated. codegen.ts: a candidate -> the raw body the
+                          control plane's tool factory runs (`async (input, secrets)`): an HTTP tool calls
+                          BASE_URL (+ API_KEY) with that host as its only egress; a script tool runs the command
+                          in the owner's workspace through the gateway with the box's credential as secrets.
+                          `minns tools scan [dir] --register` drives it.
+
   cli/                  — the `minns` command (package bin). Everything it does is a bearer request to the
     config.ts             control plane's /control routes with a personal API token (mpt_..., Account > API
     client.ts             tokens). config: ~/.minns/config.json, owner-only, MINNS_TOKEN/MINNS_URL override.
     commands.ts           client: JSON + SSE (`data:` frames). commands: login/logout/whoami, agents, apps,
-    main.ts               workspaces, tokens list, usage; pure parseArgs; run(argv, io) returns an exit code
+    main.ts               workspaces, tools list/scan, tokens list, usage; pure parseArgs; run(argv, io) returns an exit code
                           (0 ok, 1 not passed, 2 error, 3 not signed in) so tests drive it without a process
 
   utils/

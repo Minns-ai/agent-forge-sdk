@@ -1,5 +1,9 @@
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { readConfig, writeConfig, clearConfig, configPath, DEFAULT_URL } from "./config.js";
 import { createClient, CliError, type Client } from "./client.js";
+import { scanFiles, scannable, type ScannedFile, type ToolCandidate } from "../scan/scanner.js";
+import { generateTool, type GeneratedTool } from "../scan/codegen.js";
 
 // The commands. Each takes parsed arguments and an output, and returns an
 // exit code; nothing here reads process.argv or calls process.exit, so the
@@ -63,6 +67,11 @@ const HELP = `minns: build and run agents, apps and workspaces from the terminal
   minns workspaces resume <id>
   minns workspaces delete <id>
 
+  minns tools list
+  minns tools scan [dir] [--only http|script] [--select a,b]        find routes and commands that could be tools
+  minns tools scan [dir] --register --base-url https://api.example.com [--api-key k]   register the HTTP ones
+  minns tools scan [dir] --register --workspace <id>                                  register the commands, run in that box
+
   minns tokens list
   minns usage
 
@@ -97,6 +106,47 @@ const show = (io: Io, p: Parsed, raw: unknown, lines: () => string[]): void => {
 type Inst = { instance_id: string; name: string; status: string; region?: string; definition?: { model?: string } };
 type App = { app_id: string; name: string; slug?: string; status: string; url?: string | null };
 type Box = { sandbox_id: string; name: string; status: string; memory_mb: number; credits_per_hour: number; last_used_at: number };
+
+const MAX_FILES = 5000;
+const MAX_FILE_BYTES = 512 * 1024;
+
+/** The scannable files under a directory, paths relative to it. Bounded so a
+ *  monorepo with a forgotten build directory does not become a wait. */
+export const readTree = (root: string): ScannedFile[] => {
+  const out: ScannedFile[] = [];
+  const walk = (dir: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries.sort()) {
+      if (out.length >= MAX_FILES) return;
+      const full = join(dir, name);
+      const rel = relative(root, full).split("\\").join("/");
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (scannable(`${rel}/x.ts`)) walk(full);
+      } else if (st.isFile() && scannable(rel) && st.size <= MAX_FILE_BYTES) {
+        try {
+          out.push({ path: rel, content: readFileSync(full, "utf8") });
+        } catch {
+          /* unreadable: not a candidate */
+        }
+      }
+    }
+  };
+  walk(root);
+  return out;
+};
+
+export const candidateLine = (t: ToolCandidate): string => (t.kind === "http" ? `${t.http!.method} ${t.http!.path}` : t.script!.command);
 
 export const run = async (argv: string[], io: Io): Promise<number> => {
   const p = parseArgs(argv);
@@ -218,6 +268,60 @@ export const run = async (argv: string[], io: Io): Promise<number> => {
         await c.del(P(id));
         io.out(`${id} deleted`);
         return 0;
+      }
+    }
+    if (group === "tools") {
+      const c = client(io);
+      if (sub === "list" || !sub) {
+        const r = await c.get<{ tools: Array<{ tool_id: string; name: string; description: string; url: string | null; status: string }> }>("/control/tools");
+        show(io, p, r, () => table(r.tools.map((t) => ({ id: t.tool_id, name: t.name, status: t.status, url: t.url ?? "" })), ["id", "name", "status", "url"]));
+        return 0;
+      }
+      if (sub === "scan") {
+        const dir = p.positional[0] ?? ".";
+        const files = readTree(dir);
+        let found = scanFiles(files);
+        if (p.flags.only) found = found.filter((t) => t.kind === String(p.flags.only));
+        if (p.flags.select) {
+          const wanted = new Set(String(p.flags.select).split(",").map((x) => x.trim()).filter(Boolean));
+          found = found.filter((t) => wanted.has(t.name));
+        }
+        if (!p.flags.register) {
+          show(io, p, { candidates: found, files: files.length }, () => [
+            `${files.length} files scanned, ${found.length} candidate${found.length === 1 ? "" : "s"}:`,
+            ...table(found.map((t) => ({ name: t.name, kind: t.kind, what: t.kind === "http" ? `${t.http!.method} ${t.http!.path}` : t.script!.command, where: t.line ? `${t.file}:${t.line}` : t.file })), ["name", "kind", "what", "where"]),
+            "",
+            "Register with --register plus --base-url (for routes) or --workspace <id> (for commands).",
+          ]);
+          return 0;
+        }
+        const targets: Parameters<typeof generateTool>[1] = {};
+        if (p.flags["base-url"]) targets.http = { baseUrl: String(p.flags["base-url"]), ...(p.flags["api-key"] ? { apiKey: String(p.flags["api-key"]) } : {}) };
+        if (p.flags.workspace) {
+          const cred = await c.get<{ url: string; token: string }>(`/control/sandboxes/${encodeURIComponent(String(p.flags.workspace))}/credential`);
+          targets.workspace = { url: cred.url, token: cred.token };
+        }
+        const doable = found.filter((t) => (t.kind === "http" ? !!targets.http : !!targets.workspace));
+        const skipped = found.length - doable.length;
+        if (!doable.length) throw new CliError(`Nothing to register: ${found.length} candidate(s) found, none with a target. Give --base-url for routes or --workspace for commands.`);
+        const registered: Array<{ name: string; tool_id?: string; error?: string }> = [];
+        for (const t of doable) {
+          const g: GeneratedTool = generateTool(t, targets);
+          try {
+            const r = await c.post<{ tool_id?: string; toolId?: string }>("/control/tools", g);
+            registered.push({ name: g.name, tool_id: r.tool_id ?? r.toolId });
+            io.err(`registered ${g.name}`);
+          } catch (e) {
+            registered.push({ name: g.name, error: e instanceof Error ? e.message : String(e) });
+            io.err(`${g.name}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        show(io, p, { registered, skipped }, () => [
+          ...table(registered.map((r) => ({ name: r.name, result: r.error ? `failed: ${r.error}` : `ok ${r.tool_id ?? ""}` })), ["name", "result"]),
+          ...(skipped ? [`${skipped} candidate(s) skipped for want of a target.`] : []),
+          "They are on your MCP tool server now; connect it to an agent from its Tools tab.",
+        ]);
+        return registered.every((r) => !r.error) ? 0 : 1;
       }
     }
     if (group === "workspaces") {
