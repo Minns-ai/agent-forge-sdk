@@ -6,6 +6,7 @@ import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
 import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
 import { estimateTokens } from "../pipeline/context-compaction.js";
 import { noted, notedFallback } from "../utils/failure.js";
+import { UNPARSEABLE_ARGUMENTS } from "../tools/tool.js";
 
 /** Extract normalized usage from an OpenAI chat-completions payload. */
 function usageFromOpenAI(provider: string, model: string, payload: any): TokenUsage {
@@ -178,10 +179,13 @@ export class OpenAIProvider implements LLMProvider {
       });
       const payload = (await response.json()) as any;
       if (!response.ok) {
+        // Keep the server's Retry-After with the error, so a retry waits as
+        // long as it was asked to.
+        const retryAfter = response.headers?.get?.("retry-after");
         throw new LLMError(
           payload?.error?.message ?? `LLM request failed with status ${response.status}`,
           response.status,
-          payload,
+          retryAfter && payload && typeof payload === "object" ? { ...payload, retry_after: retryAfter } : payload,
         );
       }
       return payload;
@@ -534,8 +538,10 @@ export class OpenAIProvider implements LLMProvider {
 function safeParseArgs(raw: string | undefined): Record<string, any> {
   if (!raw) return {};
   try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : { [UNPARSEABLE_ARGUMENTS]: "not an object" };
+  } catch (err) {
+    const why = err instanceof Error ? err.message : "parse error";
+    return { [UNPARSEABLE_ARGUMENTS]: `${why}; received ${raw.length} characters starting ${JSON.stringify(raw.slice(0, 80))}` };
   }
 }

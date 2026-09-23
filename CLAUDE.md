@@ -24,6 +24,8 @@ src/
     vcr.ts              — VCRProvider: record/replay wrapper for hermetic tests + eval oracle (InMemoryCassette, JSON persistence)
     turn-safety.ts      : judgeTurn: a turn ending in refusal or max_tokens never runs its (possibly partial) tool
                           calls, and a refusal is never reported as success. Both native loops consult it first
+    resilience.ts       : retries. A provider with no `resilience` config retries 429, 529 and 5xx up to 3 times and
+                          honours Retry-After (DEFAULT_PROVIDER_RETRY); `false` turns it off
     model-caps.ts       : which models accept temperature/top_p/top_k. Claude defaults to NO: only the older
                           models listed there accept them, so a new release omits them instead of 400ing
     types.ts            — LLM-specific types
@@ -84,13 +86,18 @@ src/
     types.ts            — SubAgentDefinition, SubAgentResult, SubAgentTask
 
   middleware/
+    backend/search.ts   : what every backend's grep and glob share: regex with a literal fallback, ignore case,
+                          node_modules and .git skipped unless searched from inside, binary files skipped, a match
+                          cap, newest-first ordering
     builtin/
       filesystem.ts     — FilesystemMiddleware: ls/glob/grep/read_file/write_file/edit_file over a BackendProtocol;
                           read-before-edit via tools/safe-edit, large tool results offloaded to /.agent/results
       shell.ts          — ShellMiddleware: `execute` over a SandboxBackend; shell-safety verdicts, destructive → ask,
                           exit codes via command-semantics
       workspace.ts      — createWorkspace(): FilesystemMiddleware + ShellMiddleware over ONE HttpSandbox, from the
-                          MINNS_SANDBOX_URL/TOKEN rails by default (readWorkspaceEnv in runtime/env.ts); null without a box
+                          MINNS_SANDBOX_URL/TOKEN rails by default (readWorkspaceEnv in runtime/env.ts); null without a box.
+                          A host that registers (and wraps) the tools itself passes `behaviour` (withoutTools) to
+                          AgentForge: the prompt, the result offload and the per-run reads, without the tools twice
       code-mode.ts      — CodeModeMiddleware: programmatic tool calling. `run_code` runs a JavaScript program in a
                           QuickJS sandbox (no host access) where tools.<name>(args) calls a disclosed tool through
                           ToolRegistry.execute (validate/authorize/approval/cap all apply); synchronous from the

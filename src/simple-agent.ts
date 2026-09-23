@@ -591,6 +591,8 @@ export class SimpleAgent {
         goalDescription: this.config.directive.goalDescription,
       },
       services: {},
+      // A cancelled run stops its tools too, not just the loop between them.
+      ...(this.signal ? { signal: this.signal } : {}),
     };
     const execOpts = {
       ...(this.config.policy ? { policy: this.config.policy } : {}),

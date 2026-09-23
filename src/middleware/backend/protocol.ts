@@ -88,7 +88,15 @@ export interface GrepResult {
   matches: GrepMatch[] | null;
   /** Error code on failure */
   error: FileOperationError | null;
+  /** True when the pattern was searched as a regular expression. A backend
+   *  that predates regex search leaves it unset, which is how a caller tells
+   *  that its regex was searched as literal text. */
+  regex?: boolean;
+  /** True when the search stopped at its match cap. */
+  capped?: boolean;
 }
+
+import type { GrepOptions } from "./search.js";
 
 // ─── Backend Protocol ────────────────────────────────────────────────────────
 
@@ -154,12 +162,12 @@ export interface BackendProtocol {
   glob(pattern: string, basePath?: string): Promise<GlobResult>;
 
   /**
-   * Search for a text pattern in files.
+   * Search file contents, line by line.
    *
-   * @param pattern - Literal string to search for
-   * @param options - Optional: path (directory to search), fileGlob (filter files)
+   * @param pattern - Literal text, or a regular expression when `options.regex`
+   * @param options - path, fileGlob, regex, ignoreCase, maxMatches (see GrepOptions)
    */
-  grep(pattern: string, options?: { path?: string; fileGlob?: string }): Promise<GrepResult>;
+  grep(pattern: string, options?: GrepOptions): Promise<GrepResult>;
 
   /**
    * Check if a path exists and whether it's a file or directory.

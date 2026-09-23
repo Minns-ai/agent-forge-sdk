@@ -11,7 +11,9 @@ export interface OpenAIProviderConfig {
   timeoutMs?: number;
   /** Called with normalized token usage + cost after each completion. */
   onUsage?: (usage: TokenUsage) => void;
-  /** Retry/backoff + circuit-breaker policy. `true` enables sensible defaults. */
+  /** Retry/backoff + circuit-breaker policy. Unset retries rate limits,
+   *  overload (529) and 5xx up to 3 times, honouring Retry-After; `false`
+   *  turns retries off; `true` or an object retries every transient error. */
   resilience?: ResilienceConfig;
 }
 
@@ -36,6 +38,8 @@ export interface AnthropicProviderConfig {
   timeoutMs?: number;
   /** Called with normalized token usage + cost after each completion. */
   onUsage?: (usage: TokenUsage) => void;
-  /** Retry/backoff + circuit-breaker policy. `true` enables sensible defaults. */
+  /** Retry/backoff + circuit-breaker policy. Unset retries rate limits,
+   *  overload (529) and 5xx up to 3 times, honouring Retry-After; `false`
+   *  turns retries off; `true` or an object retries every transient error. */
   resilience?: ResilienceConfig;
 }

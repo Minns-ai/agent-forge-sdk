@@ -3,6 +3,8 @@ import { FilesystemMiddleware } from "../../src/middleware/builtin/filesystem.js
 import { StateBackend } from "../../src/middleware/backend/state-backend.js";
 import type { ToolContext, ToolDefinition, ToolResult } from "../../src/types.js";
 import type { PipelineState } from "../../src/middleware/types.js";
+import type { BackendProtocol } from "../../src/middleware/backend/protocol.js";
+import { withRun } from "../../src/utils/run-context.js";
 
 // The file tools a coding agent rests on, over an in-memory tree. What is
 // pinned here is the discipline, not the plumbing: a read is a bounded window
@@ -241,5 +243,150 @@ describe("a large result becomes a file, not a dead end", () => {
     const { mw } = make(tree(), { offloadThresholdChars: 0 });
     const out = await mw.wrapToolCall!({ name: "t", params: {}, context: ctx }, async () => ({ success: true, result: big }), state(), {} as never);
     expect(out.result).toBe(big);
+  });
+});
+
+describe("searching the way a coding agent expects", () => {
+  const code = () =>
+    new StateBackend({
+      files: {
+        "/src/app.ts": "export function handleRequest() {}\nexport function handleError() {}\nconst Total = 1;\n",
+        "/src/util.ts": "export const total = 2;\n",
+        "/node_modules/dep/index.js": "export function handleRequest() {}\n",
+        "/.git/config": "handleRequest\n",
+        "/bin/tool": "handle\u0000Request\n",
+      },
+    });
+
+  it("reads the pattern as a regular expression", async () => {
+    const { run } = make(code());
+    const out = String((await run("grep", { pattern: "handle(Request|Error)", path: "/src" })).result);
+    expect(out).toContain("/src/app.ts:1:");
+    expect(out).toContain("/src/app.ts:2:");
+  });
+
+  it("searches a pattern that is not a valid regex as the text it is", async () => {
+    const { run } = make(new StateBackend({ files: { "/a.ts": "call(foo\n" } }));
+    const out = await run("grep", { pattern: "call(foo" });
+    expect(out.success).toBe(true);
+    expect(String(out.result)).toContain("/a.ts:1: call(foo");
+  });
+
+  it("ignores case when asked", async () => {
+    const { run } = make(code());
+    const exact = String((await run("grep", { pattern: "total", path: "/src" })).result);
+    const loose = String((await run("grep", { pattern: "total", path: "/src", ignore_case: true })).result);
+    expect(exact).not.toContain("Total");
+    expect(loose).toContain("const Total");
+  });
+
+  it("returns only paths, or counts per file, when asked", async () => {
+    const { run } = make(code());
+    const files = String((await run("grep", { pattern: "handle", path: "/src", output_mode: "files" })).result);
+    expect(files).toBe("/src/app.ts");
+    const count = String((await run("grep", { pattern: "handle", path: "/src", output_mode: "count" })).result);
+    expect(count).toBe("/src/app.ts: 2");
+  });
+
+  it("skips node_modules and .git from the root, but searches inside one when asked to", async () => {
+    const { run } = make(code());
+    const fromRoot = String((await run("grep", { pattern: "handleRequest" })).result);
+    expect(fromRoot).toContain("/src/app.ts");
+    expect(fromRoot).not.toContain("node_modules");
+    expect(fromRoot).not.toContain(".git");
+    const inside = String((await run("grep", { pattern: "handleRequest", path: "/node_modules" })).result);
+    expect(inside).toContain("/node_modules/dep/index.js");
+    const globbed = String((await run("glob", { pattern: "**/*.js" })).result);
+    expect(globbed).toMatch(/no files match/);
+  });
+
+  it("does not report matches inside a binary file", async () => {
+    const { run } = make(code());
+    const out = String((await run("grep", { pattern: "Request", path: "/bin" })).result);
+    expect(out).toMatch(/no matches/);
+  });
+
+  it("says when the search hit its limit, so a missing match is not taken as absent", async () => {
+    const backend = code();
+    const { run } = make({
+      ...backend,
+      grep: (pattern: string, options?: object) => backend.grep(pattern, { ...options, maxMatches: 1 }),
+    } as unknown as BackendProtocol);
+    const out = String((await run("grep", { pattern: "handle", path: "/src" })).result);
+    expect(out).toContain("stopped at its match limit");
+  });
+
+  it("says so when an older workspace searched a regex as plain text", async () => {
+    const backend = code();
+    const { run } = make({
+      ...backend,
+      grep: async (pattern: string, options?: object) => {
+        const r = await backend.grep(pattern, options);
+        return { matches: r.matches, error: r.error };
+      },
+    } as unknown as BackendProtocol);
+    const out = String((await run("grep", { pattern: "handle.*", path: "/src" })).result);
+    expect(out).toContain("searched the pattern as plain text");
+  });
+
+  it("lists the most recently changed files first", async () => {
+    const backend = new StateBackend({ files: { "/old.ts": "a", "/new.ts": "b" } });
+    await new Promise((r) => setTimeout(r, 5));
+    await backend.write("/new.ts", "b2");
+    const { run } = make(backend);
+    expect(String((await run("glob", { pattern: "*.ts" })).result).split("\n")).toEqual(["/new.ts", "/old.ts"]);
+  });
+});
+
+describe("overwriting is an edit of the whole file", () => {
+  it("refuses to overwrite a file the model has not read", async () => {
+    const { run, backend } = make();
+    const out = await run("write_file", { path: "/src/a.ts", content: "gone\n" });
+    expect(out.success).toBe(false);
+    expect(out.error).toMatch(/already exists and you have not read it/);
+    expect((await backend.read("/src/a.ts")).content).toContain("hidden");
+  });
+
+  it("overwrites once the file has been read", async () => {
+    const { run } = make();
+    await run("read_file", { path: "/src/a.ts" });
+    expect((await run("write_file", { path: "/src/a.ts", content: "new\n" })).success).toBe(true);
+  });
+
+  it("refuses to overwrite a file that changed since it was read", async () => {
+    const { run, backend } = make();
+    await run("read_file", { path: "/src/a.ts" });
+    await backend.write("/src/a.ts", "someone else\n");
+    const out = await run("write_file", { path: "/src/a.ts", content: "mine\n" });
+    expect(out.success).toBe(false);
+    expect(out.error).toMatch(/changed since you read it/);
+  });
+
+  it("creates a new file without any read", async () => {
+    const { run } = make();
+    expect((await run("write_file", { path: "/fresh.ts", content: "x\n" })).success).toBe(true);
+  });
+});
+
+describe("reads belong to the run that made them", () => {
+  // One deployed agent serves many runs at once. A read in one run must not
+  // license an edit in another, and one run starting must not wipe the reads
+  // of a run still in flight.
+  it("a read in one run does not license an edit in another", async () => {
+    const { run } = make();
+    await withRun("run-a", () => run("read_file", { path: "/src/a.ts" }));
+    const other = await withRun("run-b", () => run("edit_file", { path: "/src/a.ts", old_string: "a = 1", new_string: "a = 2" }));
+    expect(other.success).toBe(false);
+    expect(other.error).toMatch(/has not been read/);
+  });
+
+  it("another run starting does not wipe the reads of a run in flight", async () => {
+    const { mw, run } = make();
+    await withRun("run-a", async () => {
+      await run("read_file", { path: "/src/a.ts" });
+      await withRun("run-b", () => mw.beforeExecute!(state(), {} as never));
+      const out = await run("edit_file", { path: "/src/a.ts", old_string: "a = 1", new_string: "a = 2" });
+      expect(out.success).toBe(true);
+    });
   });
 });

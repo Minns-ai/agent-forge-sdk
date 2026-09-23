@@ -243,7 +243,13 @@ export function createSandboxHandler(opts: SandboxServerOptions): {
               sendJson(res, 200, await backend.glob(str(body.pattern) ?? "", str(body.basePath)));
               return;
             case "grep":
-              sendJson(res, 200, await backend.grep(str(body.pattern) ?? "", { path: str(body.path), fileGlob: str(body.fileGlob) }));
+              sendJson(res, 200, await backend.grep(str(body.pattern) ?? "", {
+                path: str(body.path),
+                fileGlob: str(body.fileGlob),
+                regex: body.regex === true,
+                ignoreCase: body.ignoreCase === true,
+                ...(typeof body.maxMatches === "number" ? { maxMatches: body.maxMatches } : {}),
+              }));
               return;
             case "exists":
               sendJson(res, 200, await backend.exists(path));

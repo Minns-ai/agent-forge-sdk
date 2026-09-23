@@ -10,6 +10,7 @@ import type {
   WriteResult,
 } from "../../middleware/backend/protocol.js";
 import { NDJSON, type ExecEvent } from "../../runtime/sandbox-contract.js";
+import type { GrepOptions } from "../../middleware/backend/search.js";
 import { noteFailure } from "../../utils/failure.js";
 
 // A remote workspace, as both halves the agent needs: the shell
@@ -180,7 +181,7 @@ export class HttpSandbox implements SandboxBackend, BackendProtocol {
   glob(pattern: string, basePath?: string): Promise<GlobResult> {
     return this.fs("glob", { pattern, basePath }, { matches: null, error: "backend_unavailable" as FileOperationError });
   }
-  grep(pattern: string, options?: { path?: string; fileGlob?: string }): Promise<GrepResult> {
+  grep(pattern: string, options?: GrepOptions): Promise<GrepResult> {
     return this.fs("grep", { pattern, ...options }, { matches: null, error: "backend_unavailable" as FileOperationError });
   }
   exists(path: string): Promise<{ exists: boolean; isDir: boolean }> {

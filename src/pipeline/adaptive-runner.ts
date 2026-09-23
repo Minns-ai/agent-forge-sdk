@@ -58,6 +58,12 @@ import { judgeTurn, truncationFeedback, MAX_TRUNCATED_TURNS } from "../llm/turn-
 
 // ─── Heuristic Router ─────────────────────────────────────────────────────────
 
+
+/** Said to the model the second time a call returns exactly what it returned
+ *  before: the third time, the run stops. */
+const REPEAT_NOTE =
+  "You made this exact call before and got this same result. Repeating it will not change the outcome: change the arguments or try a different approach.";
+
 export type ExecutionTier = "loop" | "graph";
 
 /**
@@ -293,6 +299,8 @@ function buildToolSpecs(registry: ToolRegistry, disclosed?: Set<string>): LLMToo
  */
 export class AdaptiveRunner {
   private directive: Required<Directive>;
+  /** The agent's own step cap, when it set one; the loop defaults to 25. */
+  private maxStepsOverride: number | undefined;
   private llm: LLMProvider;
   private client: any;
   private agentId: number;
@@ -341,6 +349,7 @@ export class AdaptiveRunner {
     onApprovalRequired?: ToolExecuteOptions["onApprovalRequired"];
   }) {
     this.directive = resolveDirective(params.directive);
+    this.maxStepsOverride = params.directive.maxIterations;
     this.llm = params.llm;
     this.client = params.client;
     this.agentId = params.agentId;
@@ -788,6 +797,9 @@ export class AdaptiveRunner {
      *  paths below so the streaming path can't quietly drop settings the
      *  non-streaming paths honour. */
     options?: LLMCompletionOptions,
+    /** Adds the middleware prompt sections. The onion's terminal adds them on
+     *  path 2; the streaming and direct paths bypass it, so they apply this. */
+    promptFor: (msgs: LLMMessage[]) => LLMMessage[] = (msgs) => msgs,
   ): Promise<{ response: LLMToolResponse; messages: LLMMessage[] }> {
     let current = messages;
     for (let attempt = 0; ; attempt++) {
@@ -799,14 +811,14 @@ export class AdaptiveRunner {
         //    caller only attaches `onDelta` when no wrapModelCall middleware is
         //    registered, because streamed calls bypass the request/response
         //    onion (a stream cannot flow through a NextFn that returns a whole
-        //    ModelResponse); system-prompt modifications still apply because
-        //    they act on `messages`.
+        //    ModelResponse); system-prompt modifications are applied here
+        //    through promptFor, since the terminal that applies them is skipped.
         // 2. The middleware onion (via) for non-streaming tool calls.
         // 3. Direct provider call.
         let response: LLMToolResponse;
         if (onDelta && this.llm.streamWithTools) {
           let final: LLMToolResponse | null = null;
-          for await (const ev of this.llm.streamWithTools(current, toolSpecs, options)) {
+          for await (const ev of this.llm.streamWithTools(promptFor(current), toolSpecs, options)) {
             if (ev.type === "text_delta") {
               if (ev.delta) onDelta(ev.delta);
             } else if (ev.type === "done") {
@@ -830,7 +842,7 @@ export class AdaptiveRunner {
             usage: wrapped.usage,
           };
         } else {
-          response = await this.llm.completeWithTools!(current, toolSpecs, options);
+          response = await this.llm.completeWithTools!(promptFor(current), toolSpecs, options);
         }
         return { response, messages: current };
       } catch (err) {
@@ -902,24 +914,32 @@ export class AdaptiveRunner {
         : { role: "user", content: message },
     );
 
-    // Apply middleware system prompt modifications
-    if (!this.middlewareStack.isEmpty) {
-      messages = this.middlewareStack.applySystemPromptModifications(messages, pipelineState);
-    }
+    // Middleware prompt sections are applied per model call, by the stack's
+    // terminal, never to the transcript itself: applied here as well, every
+    // section reached the model twice. The calls that bypass the stack (the
+    // text-only fallbacks below) apply them through promptFor.
+    const promptFor = (msgs: LLMMessage[]): LLMMessage[] =>
+      this.middlewareStack.isEmpty ? msgs : this.middlewareStack.applySystemPromptModifications(msgs, pipelineState);
 
     // ── Tool-calling loop ────────────────────────────────────────────────
     // Safety cap only — the agent terminates naturally when it stops calling
     // tools (a real, task-driven signal). 25 gives long-horizon tasks room to
     // finish; the old default of 10 truncated real work.
-    const maxSteps = this.directive.maxIterations ?? 25;
+    // The raw directive, not the resolved one: resolveDirective fills in the
+    // legacy pipeline's default of 3, which here capped every agent that did
+    // not set maxIterations at three model turns.
+    const maxSteps = this.maxStepsOverride ?? 25;
     let responseText = "";
     // Repetition guard: a stuck model that calls the SAME tool with the SAME args
-    // over and over makes no progress and would otherwise burn every step then
-    // return empty. Count identical (name,args) signatures and bail to the wrap-up
-    // once one repeats too many times.
+    // and gets the SAME result makes no progress, and would otherwise burn every
+    // step then return empty. A repeat call alone is not that: re-reading a file
+    // after editing it, or re-running the tests after a fix, is how work is
+    // checked, and its result differs. So the guard counts a call only when its
+    // result also matches the last one; the second time it tells the model, the
+    // third time it stops.
     const callSig = (tc: { name: string; arguments: unknown }): string =>
       `${tc.name}:${JSON.stringify(tc.arguments ?? null)}`;
-    const sigCounts = new Map<string, number>();
+    const sigSeen = new Map<string, { result: string; count: number }>();
     let truncatedTurns = 0;
     const MAX_IDENTICAL_CALLS = 3;
     // Set when the tool-path wrap-up below has already burned a recovery
@@ -981,7 +1001,7 @@ export class AdaptiveRunner {
           // compaction uses a token estimate; the call below adds a REACTIVE net
           // that shrinks harder if the provider still rejects it as too long.
           messages = compactMessages(messages);
-          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta);
+          const recovered = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta, undefined, promptFor);
           messages = recovered.messages;
           const response = recovered.response;
           addUsage(response.usage);
@@ -1010,19 +1030,6 @@ export class AdaptiveRunner {
 
           // Process any tool calls
           if (response.toolCalls.length > 0) {
-            // Repetition guard — check BEFORE pushing the assistant turn so we bail
-            // on a clean transcript (no dangling tool_use without a tool_result).
-            let repeated = false;
-            for (const tc of response.toolCalls) {
-              const n = (sigCounts.get(callSig(tc)) ?? 0) + 1;
-              sigCounts.set(callSig(tc), n);
-              if (n >= MAX_IDENTICAL_CALLS) repeated = true;
-            }
-            if (repeated) {
-              stopReason = "error";
-              errors.push(`stopped: a tool was called with identical arguments ${MAX_IDENTICAL_CALLS}x with no progress`);
-              break;
-            }
             // Add assistant message with tool calls
             messages.push({
               role: "assistant",
@@ -1030,48 +1037,60 @@ export class AdaptiveRunner {
               toolCalls: response.toolCalls,
             });
 
-            // Hard cap on total tool executions for the run.
+            // Hard cap on total tool executions for the run. Every tool_use
+            // still gets a result, so the transcript the wrap-up call sends is
+            // one the provider accepts.
             if (
               controls?.maxToolCalls !== undefined &&
               allToolResults.length + response.toolCalls.length > controls.maxToolCalls
             ) {
               stopReason = "max_tool_calls";
               errors.push(`Tool-call cap reached (${controls.maxToolCalls}) — stopping`);
+              for (const tc of response.toolCalls) {
+                messages.push({
+                  role: "tool",
+                  content: JSON.stringify({ success: false, error: "Not run: this run reached its limit on tool calls." }),
+                  toolCallId: tc.id,
+                });
+              }
               break;
             }
 
             // Execute this turn's tool calls with capability-aware scheduling:
             // parallel-safe (read-only) calls fan out concurrently, while a
             // writer/destructive/unknown tool becomes a serial barrier so two
-            // mutations never race. Results are processed in ORIGINAL order so
-            // native tool_use/tool_result pairing stays valid regardless.
+            // mutations never race. Results are returned in the ORIGINAL order,
+            // one per tool_use, whatever order they finished in.
             // find_tools is answered here, not by the registry: it changes what
             // the model may see next turn. And a deferred tool the model has
             // not surfaced is refused, so disclosure is a rule and not a hint.
-            const executed: Array<{ toolCall: (typeof response.toolCalls)[number]; toolResult: ToolResult }> = [];
-            const toRun: typeof response.toolCalls = [];
-            for (const tc of response.toolCalls) {
+            type Call = (typeof response.toolCalls)[number];
+            const slots: Array<{ toolCall: Call; toolResult: ToolResult } | undefined> = new Array(response.toolCalls.length);
+            const toRun: Call[] = [];
+            const slotOf = new Map<Call, number>();
+            response.toolCalls.forEach((tc, i) => {
               if (tc.name === FIND_TOOLS_SPEC.name) {
                 const query = String((tc.arguments as { query?: unknown })?.query ?? "");
                 const matches = this.toolRegistry.search(query).filter((t) => !disclosed.has(t.name));
                 for (const m of matches) disclosed.add(m.name);
                 toolSpecs = buildToolSpecs(this.toolRegistry, disclosed);
                 allReasoning.push(`find_tools("${query}"): ${matches.length} loaded`);
-                executed.push({
+                slots[i] = {
                   toolCall: tc,
                   toolResult: matches.length
                     ? { success: true, result: `Loaded: ${matches.map((m) => m.name).join(", ")}. You can call them now.` }
                     : { success: false, error: `No tools matched "${query}". Try other keywords.` },
-                });
+                };
               } else if (this.toolRegistry.has(tc.name) && !disclosed.has(tc.name)) {
-                executed.push({
+                slots[i] = {
                   toolCall: tc,
                   toolResult: { success: false, error: `"${tc.name}" is not loaded. Call find_tools with keywords for it first.` },
-                });
+                };
               } else {
+                slotOf.set(tc, i);
                 toRun.push(tc);
               }
-            }
+            });
             const batches = planToolBatches(
               toRun,
               (name) => this.toolRegistry.get(name),
@@ -1081,15 +1100,31 @@ export class AdaptiveRunner {
                 this.toolPolicy || this.onApprovalRequired
                   ? { policy: this.toolPolicy, onApprovalRequired: this.onApprovalRequired }
                   : undefined;
-              const run = (toolCall: (typeof response.toolCalls)[number]) =>
+              const run = (toolCall: Call) =>
                 this.toolRegistry
                   .execute(toolCall.name, toolCall.arguments, toolContext, execOpts)
-                  .then((toolResult) => ({ toolCall, toolResult }));
+                  .then((toolResult) => {
+                    slots[slotOf.get(toolCall)!] = { toolCall, toolResult };
+                  });
               if (batch.parallel) {
-                executed.push(...(await Promise.all(batch.calls.map(run))));
+                await Promise.all(batch.calls.map(run));
               } else {
-                executed.push(await run(batch.calls[0]));
+                await run(batch.calls[0]);
               }
+            }
+            const executed = slots.filter((x): x is { toolCall: Call; toolResult: ToolResult } => x !== undefined);
+
+            // The repetition guard, on results (see its definition).
+            let stuck = false;
+            const repeatedCalls = new Set<Call>();
+            for (const { toolCall, toolResult } of executed) {
+              const sig = callSig(toolCall);
+              const outcome = JSON.stringify([toolResult.success, toolResult.result ?? null, toolResult.error ?? null]);
+              const prev = sigSeen.get(sig);
+              const count = prev && prev.result === outcome ? prev.count + 1 : 1;
+              sigSeen.set(sig, { result: outcome, count });
+              if (count >= MAX_IDENTICAL_CALLS) stuck = true;
+              else if (count === 2) repeatedCalls.add(toolCall);
             }
 
             for (const { toolCall, toolResult } of executed) {
@@ -1102,7 +1137,7 @@ export class AdaptiveRunner {
 
               messages.push({
                 role: "tool",
-                content: JSON.stringify(toolResult),
+                content: JSON.stringify(repeatedCalls.has(toolCall) ? { ...toolResult, note: REPEAT_NOTE } : toolResult),
                 toolCallId: toolCall.id,
               });
 
@@ -1129,6 +1164,12 @@ export class AdaptiveRunner {
               });
             }
 
+            if (stuck) {
+              stopReason = "error";
+              errors.push(`stopped: a tool was called ${MAX_IDENTICAL_CALLS}x with identical arguments and got the same result each time`);
+              break;
+            }
+
             // Check if goal is now complete
             const progress = this.goalChecker(sessionState);
             pipelineState.goalProgress = progress;
@@ -1137,7 +1178,7 @@ export class AdaptiveRunner {
               stopReason = "done";
               // Let the model generate a final response with goal-complete context
               try {
-                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta);
+                const finalResponse = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta, undefined, promptFor);
                 messages = finalResponse.messages;
                 responseText = finalResponse.response.content ?? "";
                 addUsage(finalResponse.response.usage);
@@ -1182,7 +1223,7 @@ export class AdaptiveRunner {
           // Reuse the tool-calling path (same message serialization the loop used,
           // so tool_use/tool_result pairing stays valid) but instruct no more tools
           // and take the text it produces.
-          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs, toolModelCall, onDelta);
+          const wrap = await this.completeWithToolsRecovering(wrapUp, toolSpecs, toolModelCall, onDelta, undefined, promptFor);
           responseText = wrap.response.content ?? "";
           addUsage(wrap.response.usage);
         } catch (err: any) {
@@ -1192,7 +1233,7 @@ export class AdaptiveRunner {
     } else {
       // Fallback: simple completion without native tools
       try {
-        responseText = await this.llm.complete(messages);
+        responseText = await this.llm.complete(promptFor(messages));
         stopReason = "done";
       } catch (err: any) {
         stopReason = "error";
@@ -1220,7 +1261,7 @@ export class AdaptiveRunner {
               "Based on the information and tool results above, write your final " +
               "answer to the user now, directly and concisely. Do not call any more tools.",
           });
-          responseText = (await this.llm.complete(messages)).trim();
+          responseText = (await this.llm.complete(promptFor(messages))).trim();
         } catch (err: any) {
           errors.push(err?.message || "final synthesis failed");
         }

@@ -4,6 +4,8 @@ import {
   isTransientError,
   CircuitBreaker,
   createResilientRunner,
+  DEFAULT_PROVIDER_RETRY,
+  isRateLimitOrOverload,
 } from "../../src/llm/resilience.js";
 import { LLMError } from "../../src/errors.js";
 
@@ -122,5 +124,69 @@ describe("createResilientRunner", () => {
     });
     expect(result).toBe("done");
     expect(calls).toBe(2);
+  });
+});
+
+describe("the retry a provider gets without asking", () => {
+  // Vendor SDKs throw their own API errors inside the retry runner, before a
+  // provider wraps them: a status on a plain object, not on an LLMError.
+  const apiError = (status: number, headers?: Record<string, string>) =>
+    Object.assign(new Error(`status ${status}`), { status, ...(headers ? { headers: new Headers(headers) } : {}) });
+
+  it("treats a vendor SDK's 429, 529 and 5xx as transient, and its 400 as permanent", () => {
+    expect(isTransientError(apiError(429))).toBe(true);
+    expect(isTransientError(apiError(529))).toBe(true);
+    expect(isTransientError(apiError(500))).toBe(true);
+    expect(isTransientError(apiError(400))).toBe(false);
+    expect(isTransientError(new Error("Overloaded"))).toBe(true);
+  });
+
+  it("retries an overloaded API by default and then succeeds", async () => {
+    let calls = 0;
+    const slept: number[] = [];
+    const out = await withRetry(
+      async () => {
+        calls++;
+        if (calls < 3) throw apiError(529);
+        return "ok";
+      },
+      { ...DEFAULT_PROVIDER_RETRY, sleep: async (ms) => void slept.push(ms) },
+    );
+    expect(out).toBe("ok");
+    expect(calls).toBe(3);
+    expect(slept).toHaveLength(2);
+  });
+
+  it("waits as long as Retry-After says", async () => {
+    let calls = 0;
+    const slept: number[] = [];
+    await withRetry(
+      async () => {
+        if (calls++ === 0) throw apiError(429, { "retry-after": "2" });
+        return "ok";
+      },
+      { ...DEFAULT_PROVIDER_RETRY, sleep: async (ms) => void slept.push(ms) },
+    );
+    expect(slept).toEqual([2000]);
+  });
+
+  it("does not retry a bad request, or an error with no status, by default", async () => {
+    const run = createResilientRunner(undefined);
+    let calls = 0;
+    await expect(run(async () => { calls++; throw apiError(400); })).rejects.toThrow();
+    await expect(run(async () => { calls++; throw new LLMError("parse failure"); })).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+
+  it("resilience: false turns retries off", async () => {
+    const run = createResilientRunner(false);
+    let calls = 0;
+    await expect(run(async () => { calls++; throw apiError(529); })).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
+  it("classifies with isRateLimitOrOverload", () => {
+    expect(isRateLimitOrOverload(apiError(529))).toBe(true);
+    expect(isRateLimitOrOverload(new LLMError("no status"))).toBe(false);
   });
 });

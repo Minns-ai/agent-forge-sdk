@@ -47,7 +47,7 @@ const SYSTEM_PROMPT = `
 
 ## Shell
 
-\`execute\` runs in a sandbox with a time limit; long output is cut in the middle, and a destructive command asks for approval first. Use the file tools to read and edit; use the shell to build, test and run git.`;
+\`execute\` runs a command in a sandbox with a time limit; long output is cut in the middle. A destructive command waits for a person to approve it, so give every command a short \`description\` of what it does. Use the shell to build, test, install and run git, and the file tools to read, search and edit. After changing code, run its build or tests before saying it works.`;
 
 const asString = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
 
@@ -107,7 +107,7 @@ export class ShellMiddleware implements Middleware {
   private executeTool(): ToolDefinition {
     return buildTool({
       name: "execute",
-      description: "Run a shell command in the sandbox. Returns stdout, stderr and the exit code.",
+      description: "Run a shell command in the sandbox. Returns the exit code, stdout and stderr.",
       // The registry's destructive auto-ask keys on the TOOL's effect; a shell
       // tool's effect is per command, so this stays "write" and checkAccess
       // does the per-command work.
@@ -115,6 +115,7 @@ export class ShellMiddleware implements Middleware {
       timeoutMs: 0, // the sandbox enforces its own cap, with the margin it needs
       parameters: {
         command: { type: "string", description: "The command line" },
+        description: { type: "string", description: "What the command does, in a few words, for the person watching or approving", optional: true },
         cwd: { type: "string", description: "Working directory. Default the sandbox root", optional: true },
         timeout_ms: { type: "integer", description: "Time limit in milliseconds. Default 120000", optional: true },
       },
@@ -130,11 +131,13 @@ export class ShellMiddleware implements Middleware {
       checkAccess: (p) => {
         const check = checkShellCommand(asString(p.command).trim(), this.safety);
         if (check.effect === "destructive") {
-          return { ask: true, reason: `destructive command: ${check.reasons.join("; ") || check.baseCommand}` };
+          const said = asString(p.description).trim();
+          const why = check.reasons.join("; ") || check.baseCommand;
+          return { ask: true, reason: said ? `${said} (destructive command: ${why})` : `destructive command: ${why}` };
         }
         return { allow: true };
       },
-      describe: (p) => `Running ${asString(p.command).slice(0, 60)}`,
+      describe: (p) => asString(p.description).trim() || `Running ${asString(p.command).slice(0, 60)}`,
       execute: async (params, context): Promise<ToolResult> => {
         const command = asString(params.command).trim();
         const cwd = asString(params.cwd).trim() || this.cwd;

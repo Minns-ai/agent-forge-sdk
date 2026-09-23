@@ -88,6 +88,12 @@ describe("base input tokens", () => {
   // files+shell+todo 1391, MinnsFullPower 2951 loaded and 680 deferred. The
   // budgets sit about 25% above so an estimate's drift does not fail them and
   // a real regression does.
+  //
+  // Files+shell is 1228 since the tools learned regex search and the prompt
+  // says how to use them (read before overwriting, search with grep not the
+  // shell, check a change by running it). That measurement is also the first
+  // honest one: until the same change, every middleware prompt section was
+  // sent twice, so 1078 carried two copies of a shorter prompt.
   it("a bare agent costs under 250 tokens before it does anything", async () => {
     const m = await measure();
     expect(m.toolCount).toBe(0);
@@ -101,6 +107,50 @@ describe("base input tokens", () => {
     ]);
     expect(m.toolCount).toBe(7);
     expect(m.total).toBeLessThan(1350);
+  });
+
+  it("sends each middleware prompt section once", async () => {
+    // The runner used to apply middleware prompt sections to the transcript
+    // AND the stack applied them again on every call, so each section reached
+    // the model twice.
+    const { llm, seen } = capture();
+    const agent = new AgentForge({
+      directive: { identity: "You are a careful software engineer.", goalDescription: "Do what is asked." },
+      llm,
+      agentId: 1,
+      middleware: [
+        new FilesystemMiddleware({ backend: new StateBackend() }),
+        new ShellMiddleware({ sandbox: { name: "none", async exec() { throw new Error("unused"); } } }),
+      ],
+    });
+    await agent.run("hello", { sessionId: 1 });
+    const system = systemOf(seen[0].messages);
+    expect(system.split("## Files").length - 1).toBe(1);
+    expect(system.split("## Shell").length - 1).toBe(1);
+  });
+
+  it("sends each prompt section once on a streamed run too, where the call bypasses the middleware onion", async () => {
+    const systems: string[] = [];
+    const llm: LLMProvider = {
+      async complete() { return "done"; },
+      async *stream() {},
+      async completeWithTools(): Promise<LLMToolResponse> {
+        throw new Error("should stream instead");
+      },
+      async *streamWithTools(messages) {
+        systems.push(systemOf(messages));
+        yield { type: "done" as const, response: { content: "done", toolCalls: [], stopReason: "end_turn" as const } };
+      },
+    };
+    const agent = new AgentForge({
+      directive: { identity: "You are a careful software engineer.", goalDescription: "Do what is asked." },
+      llm,
+      agentId: 1,
+      middleware: [new FilesystemMiddleware({ backend: new StateBackend() })],
+    });
+    await agent.runWithEvents("hello", () => {}, { sessionId: 1 });
+    expect(systems).toHaveLength(1);
+    expect(systems[0].split("## Files").length - 1).toBe(1);
   });
 
   it("the todo tools are opt-in, and cost under 400 tokens when opted into", async () => {

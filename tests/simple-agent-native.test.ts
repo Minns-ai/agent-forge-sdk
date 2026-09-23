@@ -21,6 +21,24 @@ const echoTool: ToolDefinition = buildTool({
 });
 
 describe("SimpleAgent native tool-calling loop", () => {
+  it("hands the run's cancel signal to its tools, so a cancel stops a running tool too", async () => {
+    let seen: AbortSignal | undefined;
+    const probe = buildTool({
+      name: "probe", description: "probe", effect: "read", parameters: {},
+      async execute(_p, ctx) { seen = ctx.signal; return { success: true, result: "ok" }; },
+    });
+    const llm = scriptedTools([
+      { content: "", toolCalls: [call("1", "probe")], stopReason: "tool_use" },
+      { content: "done", toolCalls: [], stopReason: "end_turn" },
+    ]);
+    const controller = new AbortController();
+    const agent = new SimpleAgent({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [probe], toolCalling: "native" });
+    await agent.run("go", { signal: controller.signal });
+    expect(seen).toBeDefined();
+    controller.abort();
+    expect(seen!.aborted).toBe(true);
+  });
+
   it("dispatches a native tool call, then terminates naturally on no tool calls", async () => {
     const llm = scriptedTools([
       { content: "calling echo", toolCalls: [call("1", "echo", { v: "hi" })], stopReason: "tool_use" },

@@ -10,6 +10,7 @@ import type { ToolDefinition, ToolResult } from "../../types.js";
 import type { BackendProtocol, FileOperationError } from "../backend/protocol.js";
 import { buildTool } from "../../tools/tool.js";
 import { ReadRegistry, contentVersion, guardedEdit } from "../../tools/safe-edit.js";
+import { currentRun, type RunContext } from "../../utils/run-context.js";
 
 // The file tools a coding agent is built on: ls, glob, grep, read_file,
 // write_file, edit_file. They run over any BackendProtocol, so the same agent
@@ -115,13 +116,13 @@ const SYSTEM_PROMPT = `
 
 ## Files
 
-Paths are absolute. Read a file before editing it; \`edit_file\` replaces one exact snippet and refuses an ambiguous one, so include enough context to make it unique. A large result is saved to a file and you are given its path: read the part you need.`;
+Paths are absolute from the root, /. Read a file before you edit or overwrite it: each change is checked against what you read, so a blind or stale edit is refused instead of overwriting work you have not seen. \`edit_file\` replaces one exact snippet; include enough context to make it unique. Search with \`grep\` and \`glob\`, not the shell: their output is bounded and they skip node_modules and .git. Reads that do not depend on each other can go out together in one turn. A large result is saved to a file and you are given its path: read the part you need.`;
 
 const SYSTEM_PROMPT_READ_ONLY = `
 
 ## Files
 
-Paths are absolute. A large result is saved to a file and you are given its path: read the part you need.`;
+Paths are absolute from the root, /. Search with \`grep\` and \`glob\`; reads that do not depend on each other can go out together in one turn. A large result is saved to a file and you are given its path: read the part you need.`;
 
 /**
  * FilesystemMiddleware: file tools for the model over a pluggable backend.
@@ -146,8 +147,12 @@ export class FilesystemMiddleware implements Middleware {
   private readonly offloadDir: string;
   private readonly offloadPreviewLines: number;
 
-  /** Read-before-write and staleness, per path. */
-  private reads = new ReadRegistry();
+  /** Read-before-write and staleness, per path, per run. One agent serves
+   *  concurrent runs, and what one run read says nothing about what another
+   *  has seen: keyed on the run, a run's reads end with it. */
+  private readsByRun = new WeakMap<RunContext, ReadRegistry>();
+  /** Reads outside any run: a host calling a tool directly. */
+  private looseReads = new ReadRegistry();
   private offloaded = 0;
 
   constructor(config: FilesystemConfig) {
@@ -170,11 +175,21 @@ export class FilesystemMiddleware implements Middleware {
     return this.offloadDir;
   }
 
+  /** The read registry for the run in progress. */
+  private get reads(): ReadRegistry {
+    const run = currentRun();
+    if (!run) return this.looseReads;
+    let reads = this.readsByRun.get(run);
+    if (!reads) this.readsByRun.set(run, (reads = new ReadRegistry()));
+    return reads;
+  }
+
   async beforeExecute(_state: PipelineState, _context: MiddlewareContext): Promise<StateUpdate | void> {
     // A fresh turn is a fresh view of the tree: what was read last turn may
     // have changed since, and the discipline is "read before edit", not
-    // "read once ever".
-    this.reads = new ReadRegistry();
+    // "read once ever". A run's registry is new with the run; this clears
+    // the one used outside a run.
+    this.looseReads = new ReadRegistry();
     return { middlewareState: { [this.name]: { offloaded: 0 } } };
   }
 
@@ -248,7 +263,7 @@ export class FilesystemMiddleware implements Middleware {
   private globTool(): ToolDefinition {
     return buildTool({
       name: "glob",
-      description: "Find files by pattern, for example **/*.ts or src/**/*.test.ts.",
+      description: "Find files by name pattern, newest first, for example **/*.ts. Skips node_modules and .git unless you search inside one.",
       effect: "read",
       parameters: {
         pattern: { type: "string", description: "Glob pattern with * ** and ?" },
@@ -261,7 +276,8 @@ export class FilesystemMiddleware implements Middleware {
         const base = normalize(params.path) || "/";
         const res = await this.backend.glob(pattern, base);
         if (res.error || !res.matches) return { success: false, error: explain(base, res.error ?? "invalid_path") };
-        const files = res.matches.filter((m) => !m.isDir).map((m) => m.path).sort();
+        // The backend orders them, newest first where it knows modification times.
+        const files = res.matches.filter((m) => !m.isDir).map((m) => m.path);
         const shown = files.slice(0, this.maxEntries);
         const cut = files.length > shown.length ? `\n... [${files.length - shown.length} more files]` : "";
         return {
@@ -276,12 +292,19 @@ export class FilesystemMiddleware implements Middleware {
   private grepTool(): ToolDefinition {
     return buildTool({
       name: "grep",
-      description: "Search file contents for an exact string. Returns path:line: text.",
+      description: "Search file contents with a regular expression (plain text works too). Returns path:line: text, or only paths or counts via output_mode.",
       effect: "read",
       parameters: {
-        pattern: { type: "string", description: "Literal text to find (not a regex)" },
+        pattern: { type: "string", description: "Regular expression; if it does not compile it is searched as plain text" },
         path: { type: "string", description: "Directory to search. Default /", optional: true },
         glob: { type: "string", description: "Only files matching this pattern, for example *.ts", optional: true },
+        ignore_case: { type: "boolean", description: "Match regardless of case. Default false", optional: true },
+        output_mode: {
+          type: "string",
+          description: "content (matching lines, the default), files (paths only), or count (matches per file)",
+          enum: ["content", "files", "count"],
+          optional: true,
+        },
       },
       validate: (p) => (asString(p.pattern) ? { ok: true } : { ok: false, error: "pattern is required" }),
       describe: (p) => `Searching for ${JSON.stringify(asString(p.pattern).slice(0, 40))}`,
@@ -289,18 +312,42 @@ export class FilesystemMiddleware implements Middleware {
         const pattern = asString(params.pattern);
         const path = normalize(params.path) || "/";
         const fileGlob = asString(params.glob).trim() || undefined;
-        const res = await this.backend.grep(pattern, { path, fileGlob });
+        const ignoreCase = params.ignore_case === true || params.ignore_case === "true";
+        const mode = asString(params.output_mode).trim() || "content";
+        const res = await this.backend.grep(pattern, { path, fileGlob, regex: true, ignoreCase });
         if (res.error || !res.matches) return { success: false, error: explain(path, res.error ?? "invalid_path") };
-        const shown = res.matches.slice(0, this.maxEntries);
-        const lines = shown.map((m) => {
-          const text = m.text.length > this.maxLineChars ? m.text.slice(0, this.maxLineChars) + " [line truncated]" : m.text;
-          return `${m.path}:${m.line}: ${text}`;
-        });
-        const cut = res.matches.length > shown.length ? `\n... [${res.matches.length - shown.length} more matches]` : "";
+
+        const notes: string[] = [];
+        if (res.capped) notes.push("[the search stopped at its match limit; narrow the path, glob or pattern]");
+        // A backend that predates regex search matched the pattern as text.
+        if (res.regex === undefined && /[\\^$.|?*+()[\]{}]/.test(pattern)) {
+          notes.push("[this workspace searched the pattern as plain text, not as a regular expression]");
+        }
+        const tail = notes.length ? "\n" + notes.join("\n") : "";
+        const total = res.matches.length;
+        if (total === 0) return { success: true, result: `no matches for ${JSON.stringify(pattern)}${tail}`, display: "0 matches" };
+
+        let body: string;
+        if (mode === "files" || mode === "count") {
+          const perFile = new Map<string, number>();
+          for (const m of res.matches) perFile.set(m.path, (perFile.get(m.path) ?? 0) + 1);
+          const rows = [...perFile].map(([file, n]) => (mode === "count" ? `${file}: ${n}` : file));
+          const shown = rows.slice(0, this.maxEntries);
+          body = shown.join("\n") + (rows.length > shown.length ? `\n... [${rows.length - shown.length} more files]` : "");
+        } else {
+          const shown = res.matches.slice(0, this.maxEntries);
+          body = shown
+            .map((m) => {
+              const text = m.text.length > this.maxLineChars ? m.text.slice(0, this.maxLineChars) + " [line truncated]" : m.text;
+              return `${m.path}:${m.line}: ${text}`;
+            })
+            .join("\n");
+          if (total > shown.length) body += `\n... [${total - shown.length} more matches]`;
+        }
         return {
           success: true,
-          result: lines.length ? lines.join("\n") + cut : `no matches for ${JSON.stringify(pattern)}`,
-          display: `${res.matches.length} match${res.matches.length === 1 ? "" : "es"}`,
+          result: body + tail,
+          display: `${total} match${total === 1 ? "" : "es"}`,
         };
       },
     });
@@ -309,7 +356,7 @@ export class FilesystemMiddleware implements Middleware {
   private readFileTool(): ToolDefinition {
     return buildTool({
       name: "read_file",
-      description: "Read a file with line numbers. Use offset and limit for a window into a large file.",
+      description: "Read a file with line numbers. Use offset and limit for a window into a large file. Read a file before editing or overwriting it.",
       effect: "read",
       parameters: {
         path: { type: "string", description: "Absolute file path" },
@@ -354,7 +401,7 @@ export class FilesystemMiddleware implements Middleware {
   private writeFileTool(): ToolDefinition {
     return buildTool({
       name: "write_file",
-      description: "Create or overwrite a file. Prefer edit_file for a change to an existing file.",
+      description: "Create a file, or overwrite one you have read. Prefer edit_file to change part of an existing file.",
       effect: "write",
       parameters: {
         path: { type: "string", description: "Absolute file path" },
@@ -371,6 +418,23 @@ export class FilesystemMiddleware implements Middleware {
         const content = asString(params.content);
         const existed = await this.backend.exists(path);
         if (existed.exists && existed.isDir) return { success: false, error: explain(path, "is_directory") };
+        if (existed.exists) {
+          // Overwriting a file is an edit of all of it, and held to the same
+          // rule: the model has seen what it is replacing, as it is now.
+          const current = await this.backend.read(path);
+          if (current.content !== null) {
+            const fresh = this.reads.checkFresh(path, contentVersion(current.content));
+            if (!fresh.ok) {
+              return {
+                success: false,
+                error:
+                  fresh.code === "stale"
+                    ? `${path} changed since you read it; read it again before overwriting`
+                    : `${path} already exists and you have not read it; read it first, or use edit_file to change part of it`,
+              };
+            }
+          }
+        }
         const res = await this.backend.write(path, content);
         if (!res.success) return { success: false, error: explain(path, res.error ?? "invalid_path") };
         // A write is a read: the model knows exactly what is there now.

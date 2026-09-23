@@ -10,6 +10,7 @@ import type {
   GrepMatch,
   FileOperationError,
 } from "./protocol.js";
+import { DEFAULT_MAX_MATCHES, inSkippedDir, lineMatcher, matchLines, newestFirst, type GrepOptions } from "./search.js";
 
 /**
  * In-memory virtual filesystem for storing files.
@@ -286,6 +287,7 @@ export class StateBackend implements BackendProtocol {
         ? filePath.slice(1) // Remove leading "/"
         : filePath.slice(base.length + 1); // Remove base + "/"
 
+      if (inSkippedDir(relative)) continue;
       if (regex.test(relative)) {
         matches.push({
           path: filePath,
@@ -297,44 +299,28 @@ export class StateBackend implements BackendProtocol {
     }
 
     return {
-      matches: matches.sort((a, b) => a.path.localeCompare(b.path)),
+      matches: newestFirst(matches),
       error: null,
     };
   }
 
-  async grep(
-    pattern: string,
-    options?: { path?: string; fileGlob?: string },
-  ): Promise<GrepResult> {
+  async grep(pattern: string, options?: GrepOptions): Promise<GrepResult> {
     const basePath = normalizePath(options?.path ?? "/");
     const fileRegex = options?.fileGlob ? globToRegex(options.fileGlob) : null;
+    const matcher = lineMatcher(pattern, options);
+    const max = Math.max(1, options?.maxMatches ?? DEFAULT_MAX_MATCHES);
     const matches: GrepMatch[] = [];
 
     for (const [filePath, entry] of this.files) {
+      if (matches.length >= max) break;
       if (!filePath.startsWith(basePath === "/" ? "/" : basePath + "/") && filePath !== basePath) continue;
-
-      // Apply file glob filter
-      if (fileRegex) {
-        const relative = basePath === "/"
-          ? filePath.slice(1)
-          : filePath.slice(basePath.length + 1);
-        if (!fileRegex.test(relative)) continue;
-      }
-
-      // Search content
-      const lines = entry.content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes(pattern)) {
-          matches.push({
-            path: filePath,
-            line: i + 1, // 1-based
-            text: lines[i],
-          });
-        }
-      }
+      const relative = basePath === "/" ? filePath.slice(1) : filePath.slice(basePath.length + 1);
+      if (inSkippedDir(relative)) continue;
+      if (fileRegex && !fileRegex.test(relative)) continue;
+      matchLines(filePath, entry.content, matcher, matches, max);
     }
 
-    return { matches, error: null };
+    return { matches, error: null, regex: matcher.regex, capped: matches.length >= max };
   }
 
   async exists(path: string): Promise<{ exists: boolean; isDir: boolean }> {

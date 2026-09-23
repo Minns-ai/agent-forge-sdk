@@ -50,16 +50,29 @@ export const abortableDelay = (ms: number, signal?: AbortSignal): Promise<void> 
     );
   });
 
-/** HTTP status codes worth retrying. */
-const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+/** HTTP status codes worth retrying. 529 is Anthropic's "overloaded". */
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+
+/** The HTTP status an error carries: our LLMError's, or the one a vendor SDK's
+ *  API error sets (the Anthropic SDK throws those inside the retry runner,
+ *  before the provider wraps them). */
+export const statusOf = (error: unknown): number | undefined => {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
+};
+
+const saysOverloaded = (error: unknown): boolean =>
+  error instanceof Error && /overloaded/i.test(error.message);
 
 /**
  * Heuristic: is this error transient (network blip, timeout, rate limit, 5xx)?
  * 4xx other than the rate/conflict codes above are treated as permanent.
  */
 export function isTransientError(error: unknown): boolean {
+  const status = statusOf(error);
+  if (status !== undefined) return RETRYABLE_STATUS.has(status);
+  if (saysOverloaded(error)) return true;
   if (error instanceof LLMError) {
-    if (typeof error.status === "number") return RETRYABLE_STATUS.has(error.status);
     // No status → network/parse/timeout class error: retry.
     return true;
   }
@@ -83,15 +96,43 @@ export function isTransientError(error: unknown): boolean {
  * Returns ms, or null. Looks at LLMError.details for common shapes.
  */
 function retryAfterMs(error: unknown): number | null {
-  if (!(error instanceof LLMError) || error.status !== 429) return null;
-  const d = error.body as unknown;
+  const status = statusOf(error);
+  if (status !== 429 && status !== 503 && status !== 529) return null;
+  const header = (h: unknown): string | undefined => {
+    if (!h) return undefined;
+    if (typeof (h as { get?: unknown }).get === "function") return (h as Headers).get("retry-after") ?? undefined;
+    return (h as Record<string, string>)["retry-after"];
+  };
+  const body = (error as { body?: unknown }).body;
   const headerVal =
-    (d as { headers?: Record<string, string> })?.headers?.["retry-after"] ??
-    (d as { retry_after?: number | string })?.retry_after;
-  if (headerVal === undefined) return null;
+    header((error as { headers?: unknown }).headers) ??
+    header((body as { headers?: unknown } | undefined)?.headers) ??
+    (body as { retry_after?: number | string } | undefined)?.retry_after;
+  if (headerVal === undefined || headerVal === null) return null;
   const secs = typeof headerVal === "string" ? Number(headerVal) : headerVal;
   return Number.isFinite(secs) && secs >= 0 ? secs * 1000 : null;
 }
+
+/**
+ * What a provider retries when its config says nothing: rate limits, overload
+ * and server errors, which a busy API returns routinely and which a second
+ * attempt usually clears. Nothing without a status is retried by default, so a
+ * bad request or a bug fails at once rather than three times slowly.
+ */
+export const isRateLimitOrOverload = (error: unknown): boolean => {
+  const status = statusOf(error);
+  if (status !== undefined) return status === 429 || status === 529 || (status >= 500 && status <= 504) || status === 408;
+  return saysOverloaded(error);
+};
+
+/** The retry a provider applies by default. Pass `resilience: false` to turn it
+ *  off, or a config of your own to replace it. */
+export const DEFAULT_PROVIDER_RETRY: RetryOptions = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 30_000,
+  retryable: isRateLimitOrOverload,
+};
 
 /**
  * Run `fn`, retrying transient failures with exponential backoff + jitter.
@@ -114,8 +155,10 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
     } catch (error) {
       if (attempt >= maxRetries || !retryable(error)) throw error;
       const exp = Math.min(maxDelayMs, initialDelayMs * backoffFactor ** attempt);
-      const base = retryAfterMs(error) ?? exp;
-      const delayMs = jitter ? Math.random() * base : base;
+      // A server that says when to come back is taken at its word (capped),
+      // without jitter shortening the wait it asked for.
+      const hinted = retryAfterMs(error);
+      const delayMs = hinted !== null ? Math.min(hinted, Math.max(maxDelayMs, 60_000)) : jitter ? Math.random() * exp : exp;
       options.onRetry?.({ attempt: attempt + 1, delayMs, error });
       await sleep(delayMs);
       attempt += 1;
@@ -221,7 +264,8 @@ export type ResilienceConfig =
 export function createResilientRunner(
   config: ResilienceConfig | undefined,
 ): <T>(fn: () => Promise<T>) => Promise<T> {
-  if (!config) return (fn) => fn();
+  if (config === false) return (fn) => fn();
+  if (config === undefined) return (fn) => withRetry(fn, DEFAULT_PROVIDER_RETRY);
   const opts: RetryOptions = config === true ? {} : config;
   const cbConfig = config === true ? undefined : config.circuitBreaker;
   const breaker = cbConfig

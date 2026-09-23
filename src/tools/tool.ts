@@ -45,6 +45,15 @@ const TOOL_DEFAULTS = {
  * Idempotent: calling it on an already-built tool is a no-op beyond re-deriving
  * defaults, so it is safe to run over a mixed list.
  */
+/**
+ * The key a provider puts arguments under when the model's arguments were not
+ * valid JSON. Parsing them to `{}` instead turned "your JSON is broken" into
+ * "you left out every required argument", which sends a model looking for the
+ * wrong mistake. The registry answers a call carrying this key with the parse
+ * failure itself.
+ */
+export const UNPARSEABLE_ARGUMENTS = "__unparseable_arguments__";
+
 export function buildTool(def: ToolDefinition): ToolDefinition {
   const effect = def.effect ?? TOOL_DEFAULTS.effect;
   return {

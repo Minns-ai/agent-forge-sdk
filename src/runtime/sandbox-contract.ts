@@ -16,7 +16,8 @@
 //   POST /fs/edit            { path, oldString, newString, replaceAll? } -> EditResult
 //   POST /fs/ls              { path }                               -> ListResult
 //   POST /fs/glob            { pattern, basePath? }                 -> GlobResult
-//   POST /fs/grep            { pattern, path?, fileGlob? }          -> GrepResult
+//   POST /fs/grep            { pattern, path?, fileGlob?, regex?,   -> GrepResult
+//                              ignoreCase?, maxMatches? }
 //   POST /fs/exists          { path }                               -> { exists, isDir }
 //   POST /fs/delete          { path }                               -> { success, error }
 //

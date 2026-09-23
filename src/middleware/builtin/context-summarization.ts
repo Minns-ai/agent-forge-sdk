@@ -9,6 +9,7 @@ import type {
 } from "../types.js";
 import type { LLMMessage, ToolDefinition, ToolResult } from "../../types.js";
 import { contentToText } from "../../llm/content.js";
+import { currentRun } from "../../utils/run-context.js";
 import type { BackendProtocol } from "../backend/protocol.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -291,6 +292,12 @@ export class ContextSummarizationMiddleware implements Middleware {
     let messages = request.messages;
     const totalTokens = estimateMessageTokens(messages);
 
+    // A summary this run already made still covers the start of the
+    // transcript: the runner keeps its full history and sends all of it every
+    // step, so without this every step past the threshold paid for a new
+    // summary of nearly the same messages.
+    messages = this.applyRollingSummary(messages);
+
     // ── Tier 1: Argument truncation ────────────────────────────────────
     if (this.truncateArgs) {
       const shouldTruncate = resolveThreshold(
@@ -431,17 +438,20 @@ export class ContextSummarizationMiddleware implements Middleware {
     const keepCount = resolveKeepCount(
       this.keep, conversationMsgs, totalTokens, this.tokenBudget,
     );
-    const cutoff = conversationMsgs.length - keepCount;
+    let cutoff = conversationMsgs.length - keepCount;
+    // Never split a tool call from its result: a kept tool result whose call
+    // was summarized away is a tool_result with no tool_use, which providers
+    // reject. Move the cut back to the turn that made the call.
+    while (cutoff > 0 && conversationMsgs[cutoff]?.role === "tool") cutoff--;
     if (cutoff <= 0) return messages;
 
     const toEvict = conversationMsgs.slice(0, cutoff);
     const toKeep = conversationMsgs.slice(cutoff);
 
-    // Filter out previous summary messages from eviction set
-    // (avoids re-summarizing summaries)
-    const toSummarize = toEvict.filter((m) => !isSummaryMessage(m));
-
-    if (toSummarize.length === 0) return messages;
+    // An earlier summary is summarized again with everything after it, so the
+    // new summary carries it forward. Dropping it lost everything it held.
+    const toSummarize = toEvict;
+    if (toSummarize.length === 0 || toSummarize.every(isSummaryMessage)) return messages;
 
     // Offload evicted messages to backend (if configured)
     let filePath: string | null = null;
@@ -451,7 +461,11 @@ export class ContextSummarizationMiddleware implements Middleware {
 
     // Generate summary via LLM
     const conversationText = toSummarize
-      .map((m) => "[" + m.role + "]: " + contentToText(m.content).slice(0, 2000))
+      .map((m) =>
+        isSummaryMessage(m)
+          ? "[summary of the conversation before this point]:\n" + contentToText(m.content).replace(SUMMARY_MARKER, "").trim().slice(0, 12_000)
+          : "[" + m.role + "]: " + contentToText(m.content).slice(0, 2000),
+      )
       .join("\n\n");
 
     // Build intent-aware context for the summary prompt
@@ -500,8 +514,13 @@ export class ContextSummarizationMiddleware implements Middleware {
     // Build compacted message array
     const compacted: LLMMessage[] = [];
     if (systemMsg) compacted.push(systemMsg);
-    compacted.push({ role: "user", content: summaryContent });
+    const summaryMessage: LLMMessage = { role: "user", content: summaryContent };
+    compacted.push(summaryMessage);
     compacted.push(...toKeep);
+
+    // Remember what this summary covers, in terms of the transcript the
+    // runner will send next step (see applyRollingSummary).
+    this.recordRollingSummary(state, toEvict, summaryMessage);
 
     // Emit event
     context.emitter.emit({
@@ -514,6 +533,55 @@ export class ContextSummarizationMiddleware implements Middleware {
     });
 
     return compacted;
+  }
+
+  // ─── Rolling summary ───────────────────────────────────────────────────
+
+  /**
+   * What the latest summary in this run covers. `covered` is the number of
+   * conversation messages (system excluded) of the ORIGINAL transcript it
+   * replaces; `prefix` fingerprints them so a transcript that changed
+   * underneath (a new session, a rewind) is never given a stale summary.
+   */
+  private rolling = new WeakMap<object, { covered: number; prefix: string; summary: LLMMessage }>();
+
+  private rollingKey(): object {
+    return currentRun() ?? this;
+  }
+
+  /** A cheap identity for a run of messages: roles, call ids and the start of
+   *  each message. Enough to tell "the same history" from "another one"
+   *  without hashing a hundred thousand tokens every step. */
+  private fingerprint(messages: LLMMessage[]): string {
+    return messages
+      .map((m) => `${m.role}|${m.toolCallId ?? ""}|${(m.toolCalls ?? []).map((t) => t.id).join(",")}|${contentToText(m.content).slice(0, 80)}`)
+      .join("\u0001");
+  }
+
+  private applyRollingSummary(messages: LLMMessage[]): LLMMessage[] {
+    const prior = this.rolling.get(this.rollingKey());
+    if (!prior) return messages;
+    const systemMsg = messages.find((m) => m.role === "system");
+    const conversation = messages.filter((m) => m.role !== "system");
+    // The transcript sent may already carry the summary (a caller that keeps
+    // the compacted messages); then there is nothing to apply.
+    if (conversation.some((m) => m === prior.summary)) return messages;
+    if (conversation.length <= prior.covered) return messages;
+    if (this.fingerprint(conversation.slice(0, prior.covered)) !== prior.prefix) return messages;
+    return [...(systemMsg ? [systemMsg] : []), prior.summary, ...conversation.slice(prior.covered)];
+  }
+
+  private recordRollingSummary(_state: Readonly<PipelineState>, evicted: LLMMessage[], summary: LLMMessage): void {
+    const key = this.rollingKey();
+    const prior = this.rolling.get(key);
+    // Evicted messages that were themselves the prior summary stand for the
+    // prior's covered range of the original transcript.
+    const startsWithPrior = prior !== undefined && evicted[0] === prior.summary;
+    const originalEvicted = startsWithPrior ? evicted.length - 1 + prior!.covered : evicted.length;
+    const prefix = startsWithPrior
+      ? prior!.prefix + (evicted.length > 1 ? "\u0001" + this.fingerprint(evicted.slice(1)) : "")
+      : this.fingerprint(evicted);
+    this.rolling.set(key, { covered: originalEvicted, prefix, summary });
   }
 
   // ─── Offloading ────────────────────────────────────────────────────────

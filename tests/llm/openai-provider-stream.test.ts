@@ -3,6 +3,7 @@ import { OpenAIProvider } from "../../src/llm/openai-provider.js";
 import { LLMError } from "../../src/errors.js";
 import type { LLMStreamEvent, LLMToolSpec } from "../../src/types.js";
 import type { TokenUsage } from "../../src/llm/usage.js";
+import { UNPARSEABLE_ARGUMENTS } from "../../src/tools/tool.js";
 
 const TOOLS: LLMToolSpec[] = [
   {
@@ -187,7 +188,7 @@ describe("OpenAIProvider.streamWithTools", () => {
     expect(response.stopReason).toBe("tool_use");
   });
 
-  it("falls back to {} arguments when the accumulated JSON does not parse", async () => {
+  it("marks arguments that do not parse, instead of passing {} as if they were empty", async () => {
     const fetchMock = vi.fn(async () =>
       sseResponse(
         sseLines(
@@ -213,7 +214,10 @@ describe("OpenAIProvider.streamWithTools", () => {
     const provider = new OpenAIProvider({ apiKey: "test-key" });
     const response = lastDone(await collect(provider.streamWithTools(MESSAGES, TOOLS)));
 
-    expect(response.toolCalls).toEqual([{ id: "call_bad", name: "get_weather", arguments: {} }]);
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls[0]).toMatchObject({ id: "call_bad", name: "get_weather" });
+    expect(Object.keys(response.toolCalls[0].arguments)).toEqual([UNPARSEABLE_ARGUMENTS]);
+    expect(String(response.toolCalls[0].arguments[UNPARSEABLE_ARGUMENTS])).toContain('"{\\"broken"');
     expect(response.stopReason).toBe("tool_use");
   });
 

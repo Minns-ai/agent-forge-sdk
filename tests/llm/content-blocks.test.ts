@@ -268,6 +268,42 @@ describe("AnthropicProvider multimodal serialization", () => {
   });
 });
 
+describe("AnthropicProvider prompt caching in a tool loop", () => {
+  const loop: LLMMessage[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "go" },
+    { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "get_weather", arguments: { location: "Paris" } }] },
+    { role: "tool", content: '{"success":true}', toolCallId: "t1" },
+  ];
+
+  it("marks the newest message as well as the system prompt, so each step reads the last from cache", async () => {
+    const { client, create } = fakeAnthropicClient();
+    const provider = makeAnthropicProvider(client);
+    await provider.completeWithTools(loop, TOOLS, { metadata: { enable_prompt_caching: true } });
+    const params = create.mock.calls[0][0] as any;
+    expect(params.system[0].cache_control).toEqual({ type: "ephemeral" });
+    const msgs = params.messages;
+    expect(msgs.at(-1).content.at(-1).cache_control).toEqual({ type: "ephemeral" });
+    const marked = JSON.stringify(msgs).split("cache_control").length - 1;
+    expect(marked).toBe(1);
+  });
+
+  it("marks nothing when caching is off", async () => {
+    const { client, create } = fakeAnthropicClient();
+    const provider = makeAnthropicProvider(client);
+    await provider.completeWithTools(loop, TOOLS);
+    expect(JSON.stringify(create.mock.calls[0][0])).not.toContain("cache_control");
+  });
+
+  it("does not leave the marker on the caller's messages", async () => {
+    const { client } = fakeAnthropicClient();
+    const provider = makeAnthropicProvider(client);
+    const messages: LLMMessage[] = [{ role: "user", content: [textBlock("hi")] }];
+    await provider.completeWithTools(messages, TOOLS, { metadata: { enable_prompt_caching: true } });
+    expect(JSON.stringify(messages)).not.toContain("cache_control");
+  });
+});
+
 // ─── OpenAI serialization ────────────────────────────────────────────────────
 
 function stubOpenAIFetch() {

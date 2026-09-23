@@ -59,7 +59,7 @@ describe("createWorkspace", () => {
     try {
       const ws = createWorkspace();
       expect(ws).not.toBeNull();
-      expect(ws!.middleware.map((m) => m.name)).toEqual(["filesystem", "shell"]);
+      expect(ws!.middleware.map((m) => m.name)).toEqual(["workspace", "filesystem", "shell"]);
     } finally {
       delete process.env.MINNS_SANDBOX_URL;
       delete process.env.MINNS_SANDBOX_TOKEN;
@@ -87,6 +87,44 @@ describe("createWorkspace", () => {
     expect(names).not.toContain("write_file");
     expect(names).not.toContain("execute");
     expect(ws.shell).toBeNull();
-    expect(ws.middleware.map((m) => m.name)).toEqual(["filesystem"]);
+    expect(ws.middleware.map((m) => m.name)).toEqual(["workspace", "filesystem"]);
+    const prompt = ws.middleware.reduce((p, m) => m.modifySystemPrompt?.(p, {} as never) ?? p, "");
+    expect(prompt).not.toContain("write_file");
+    expect(prompt).not.toContain("execute");
+  });
+});
+
+describe("a host that registers the tools itself still tells the model about them", () => {
+  // A deployed runtime registers the workspace tools itself, wrapped in its
+  // approval gates. Handing AgentForge the middleware as well would register
+  // every tool twice; handing it nothing left the model with a filesystem and
+  // a shell it was never told about. `behaviour` is the third option.
+  it("behaviour is the same middleware with no tools", () => {
+    const ws = createWorkspace({ workspace: { url, token: TOKEN } })!;
+    expect(ws.behaviour.map((m) => m.name)).toEqual(["workspace", "filesystem", "shell"]);
+    expect(ws.behaviour.every((m) => m.tools === undefined)).toBe(true);
+    expect(ws.tools.map((t) => t.name)).toContain("execute");
+  });
+
+  it("carries the prompt sections: where the box is, how to use the files and the shell, and what the host knows", () => {
+    const ws = createWorkspace({ workspace: { url, token: TOKEN }, about: "It holds a clone of github.com/acme/api." })!;
+    const prompt = ws.behaviour.reduce((p, m) => m.modifySystemPrompt?.(p, {} as never) ?? p, "");
+    expect(prompt).toContain("## Workspace");
+    expect(prompt).toContain("It holds a clone of github.com/acme/api.");
+    expect(prompt).toContain("## Files");
+    expect(prompt).toContain("## Shell");
+  });
+
+  it("shares state with the host's copies of the tools: a read through the tool licenses an edit", async () => {
+    const ws = createWorkspace({ workspace: { url, token: TOKEN } })!;
+    await tool(ws.tools, "write_file").execute({ path: "/shared.txt", content: "one\n" }, ctx);
+    // The behaviour's hooks are bound to the same middleware instance, so the
+    // offload and read tracking see the calls the host's tools make.
+    const offloader = ws.behaviour.find((m) => m.name === "filesystem")!;
+    expect(typeof offloader.wrapToolCall).toBe("function");
+    const read = await tool(ws.tools, "read_file").execute({ path: "/shared.txt" }, ctx);
+    expect(read.success).toBe(true);
+    const edit = await tool(ws.tools, "edit_file").execute({ path: "/shared.txt", old_string: "one", new_string: "two" }, ctx);
+    expect(edit.success).toBe(true);
   });
 });

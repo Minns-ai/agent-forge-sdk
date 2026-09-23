@@ -3,7 +3,7 @@ import type { AnthropicProviderConfig } from "./types.js";
 import { contentToText } from "./content.js";
 import { LLMError } from "../errors.js";
 import { makeUsage, type TokenUsage, type UsageSink } from "./usage.js";
-import { createResilientRunner, type ResilienceConfig } from "./resilience.js";
+import { createResilientRunner, statusOf, type ResilienceConfig } from "./resilience.js";
 import { samplingParams } from "./model-caps.js";
 
 /** Extract normalized usage from an Anthropic messages response. Anthropic
@@ -242,6 +242,21 @@ export class AnthropicProvider implements LLMProvider {
       msgs.push({ role: "user", content: "." });
     }
 
+    // A second breakpoint on the newest message caches the conversation so
+    // far, so the next step of a tool loop reads every earlier step from
+    // cache instead of paying for it again; the system breakpoint below only
+    // covered tools and system. The API allows four breakpoints; this uses two.
+    if (options?.enableCaching) {
+      const last = msgs[msgs.length - 1];
+      if (typeof last.content === "string") {
+        if (last.content) last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
+      } else if (Array.isArray(last.content) && last.content.length) {
+        // Copy the block: the same object may be reused by a later request.
+        const i = last.content.length - 1;
+        last.content = [...last.content.slice(0, i), { ...last.content[i], cache_control: { type: "ephemeral" } }];
+      }
+    }
+
     // Format system parameter — with or without caching
     let system: any;
     if (systemText) {
@@ -294,7 +309,7 @@ export class AnthropicProvider implements LLMProvider {
       return content;
     } catch (error) {
       if (error instanceof LLMError) throw error;
-      throw new LLMError(error instanceof Error ? error.message : String(error));
+      throw new LLMError(error instanceof Error ? error.message : String(error), statusOf(error));
     }
   }
 
@@ -336,7 +351,7 @@ export class AnthropicProvider implements LLMProvider {
       return toolResponseFromAnthropic(response, usage);
     } catch (error) {
       if (error instanceof LLMError) throw error;
-      throw new LLMError(error instanceof Error ? error.message : String(error));
+      throw new LLMError(error instanceof Error ? error.message : String(error), statusOf(error));
     }
   }
 
@@ -376,7 +391,7 @@ export class AnthropicProvider implements LLMProvider {
       yield { delta: "", done: true };
     } catch (error) {
       if (error instanceof LLMError) throw error;
-      throw new LLMError(error instanceof Error ? error.message : String(error));
+      throw new LLMError(error instanceof Error ? error.message : String(error), statusOf(error));
     }
   }
 
@@ -475,7 +490,7 @@ export class AnthropicProvider implements LLMProvider {
       yield { type: "done", response: toolResponseFromAnthropic(finalMessage, usage) };
     } catch (error) {
       if (error instanceof LLMError) throw error;
-      throw new LLMError(error instanceof Error ? error.message : String(error));
+      throw new LLMError(error instanceof Error ? error.message : String(error), statusOf(error));
     } finally {
       // Reached on early return (consumer abandoned the generator) and on
       // failure. Report the partial only when the provider actually streamed

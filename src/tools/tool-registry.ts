@@ -6,7 +6,7 @@ import type {
   ToolAccess,
   ToolFailureClass,
 } from "../types.js";
-import { evaluatePolicy, isLoaded, capResultSize } from "./tool.js";
+import { evaluatePolicy, isLoaded, capResultSize, UNPARSEABLE_ARGUMENTS } from "./tool.js";
 import { validateToolArgs } from "./schema-validator.js";
 
 /** One tool invocation as seen by the execute wrapper / middleware. */
@@ -232,7 +232,28 @@ export class ToolRegistry {
   ): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) {
-      return { success: false, failure: "not_found", error: `Tool not found: ${name}` };
+      // Name what does exist: a model that invented a tool name corrects on
+      // the next turn when it can see the real ones, and guesses again when
+      // it cannot.
+      const loaded = [...this.tools.values()].filter(isLoaded).map((t) => t.name);
+      const shown = loaded.slice(0, 30).join(", ");
+      const more = loaded.length > 30 ? `, and ${loaded.length - 30} more` : "";
+      const deferred = loaded.length < this.tools.size ? " Other tools can be found with find_tools." : "";
+      return {
+        success: false,
+        failure: "not_found",
+        error: `Tool not found: ${name}.${shown ? ` Available tools: ${shown}${more}.` : ""}${deferred}`,
+      };
+    }
+
+    if (params && typeof params === "object" && UNPARSEABLE_ARGUMENTS in params) {
+      return {
+        success: false,
+        failure: "invalid_arguments",
+        error:
+          `The arguments for "${name}" were not valid JSON (${String(params[UNPARSEABLE_ARGUMENTS])}). ` +
+          "Call the tool again with the arguments as one valid JSON object.",
+      };
     }
 
     // 0. Structural argument validation against the declared schema. Catches

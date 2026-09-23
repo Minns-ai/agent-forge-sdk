@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir, readdir, stat, unlink, rm } from "node:fs/promises";
 import { join, resolve, relative, posix } from "node:path";
+import { DEFAULT_MAX_MATCHES, SKIPPED_DIRS, lineMatcher, matchLines, newestFirst, type GrepOptions } from "./search.js";
 import type {
   BackendProtocol,
   ReadResult,
@@ -104,6 +105,9 @@ async function* walkDir(dir: string): AsyncGenerator<string> {
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
+        // The walk starts at the search base, so a search that begins inside
+        // node_modules still sees it; only descending INTO one is skipped.
+        if (SKIPPED_DIRS.has(entry.name)) continue;
         yield* walkDir(fullPath);
       } else {
         yield fullPath;
@@ -292,7 +296,7 @@ export class FilesystemBackend implements BackendProtocol {
       }
 
       return {
-        matches: matches.sort((a, b) => a.path.localeCompare(b.path)),
+        matches: newestFirst(matches),
         error: null,
       };
     } catch (err) {
@@ -300,44 +304,31 @@ export class FilesystemBackend implements BackendProtocol {
     }
   }
 
-  async grep(
-    pattern: string,
-    options?: { path?: string; fileGlob?: string },
-  ): Promise<GrepResult> {
+  async grep(pattern: string, options?: GrepOptions): Promise<GrepResult> {
     try {
       const basePath = options?.path ?? "/";
       const realBase = toRealPath(this.rootDir, basePath);
+      const matcher = lineMatcher(pattern, options);
+      const max = Math.max(1, options?.maxMatches ?? DEFAULT_MAX_MATCHES);
       const matches: GrepMatch[] = [];
 
       for await (const realPath of walkDir(realBase)) {
-        // Apply file glob filter
+        if (matches.length >= max) break;
+        const virtualPath = toVirtualPath(this.rootDir, realPath);
         if (options?.fileGlob) {
-          const virtualPath = toVirtualPath(this.rootDir, realPath);
           const relativePath = virtualPath.startsWith(basePath === "/" ? "/" : basePath + "/")
             ? virtualPath.slice((basePath === "/" ? 1 : basePath.length + 1))
             : virtualPath.slice(1);
           if (!matchesGlob(options.fileGlob, relativePath)) continue;
         }
-
         try {
-          const content = await readFile(realPath, "utf-8");
-          const lines = content.split("\n");
-
-          for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes(pattern)) {
-              matches.push({
-                path: toVirtualPath(this.rootDir, realPath),
-                line: i + 1,
-                text: lines[i],
-              });
-            }
-          }
+          matchLines(virtualPath, await readFile(realPath, "utf-8"), matcher, matches, max);
         } catch {
-          // Skip files we can't read (binary, permissions, etc.)
+          // Skip files we can't read (permissions, vanished mid-walk)
         }
       }
 
-      return { matches, error: null };
+      return { matches, error: null, regex: matcher.regex, capped: matches.length >= max };
     } catch (err) {
       return { matches: null, error: classifyError(err) };
     }

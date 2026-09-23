@@ -103,6 +103,9 @@ export {
   createResilientRunner,
   AbortError,
   abortableDelay,
+  DEFAULT_PROVIDER_RETRY,
+  isRateLimitOrOverload,
+  statusOf,
 } from "./llm/resilience.js";
 export type {
   RetryOptions,
@@ -138,6 +141,7 @@ export {
   evaluatePolicy,
   capResultSize,
   orderToolsForCache,
+  UNPARSEABLE_ARGUMENTS,
 } from "./tools/tool.js";
 export type { ToolBatch } from "./tools/tool.js";
 export {
@@ -253,7 +257,7 @@ export { PromptCacheMiddleware } from "./middleware/builtin/prompt-cache.js";
 export type { PromptCacheConfig } from "./middleware/builtin/prompt-cache.js";
 export { FilesystemMiddleware } from "./middleware/builtin/filesystem.js";
 export { ShellMiddleware } from "./middleware/builtin/shell.js";
-export { createWorkspace } from "./middleware/builtin/workspace.js";
+export { createWorkspace, withoutTools } from "./middleware/builtin/workspace.js";
 export { CodeModeMiddleware, prepareScript } from "./middleware/builtin/code-mode.js";
 export { scanFiles, scannable, nameForRoute, normalisePath, generateTool, httpToolCode, scriptToolCode } from "./scan/index.js";
 export type { ScannedFile, ToolCandidate, CandidateKind, GeneratedTool, HttpTarget, WorkspaceTarget } from "./scan/index.js";

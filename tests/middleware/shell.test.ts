@@ -67,6 +67,20 @@ describe("what may run", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("puts the model's description of a destructive command in front of the approver", async () => {
+    const { sandbox } = fake();
+    const reg = new ToolRegistry();
+    reg.register(tool(new ShellMiddleware({ sandbox })));
+    let asked = "";
+    await reg.execute("execute", { command: "rm -rf /tmp/build", description: "Clear the stale build output" }, ctx, {
+      onApprovalRequired: async (_t, _p, reason) => {
+        asked = reason;
+        return true;
+      },
+    });
+    expect(asked).toMatch(/^Clear the stale build output \(destructive command/);
+  });
+
   it("runs an ordinary command without asking anyone", async () => {
     const { sandbox, calls } = fake({ stdout: "ok\n" });
     const reg = new ToolRegistry();
