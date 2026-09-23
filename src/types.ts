@@ -313,7 +313,11 @@ export interface LLMToolResponse {
   /** Tool calls requested by the LLM */
   toolCalls: LLMToolCall[];
   /** Why the LLM stopped generating */
-  stopReason: "end_turn" | "tool_use" | "max_tokens";
+  /** Why the model stopped. "refusal" is a safety decline (Anthropic's
+   *  stop_reason "refusal", OpenAI's finish_reason "content_filter"). A turn
+   *  ending in "refusal" or "max_tokens" may carry a PARTIAL tool call that
+   *  must not run; see llm/turn-safety.ts. */
+  stopReason: "end_turn" | "tool_use" | "max_tokens" | "refusal";
   /** Token usage + estimated cost for this call, when the provider reports it. */
   usage?: import("./llm/usage.js").TokenUsage;
 }
@@ -483,6 +487,8 @@ export type StopReason =
   | "max_budget"
   | "aborted"
   | "awaiting_input"
+  /** The model declined the request on safety grounds. Never a success. */
+  | "refused"
   | "error";
 
 export interface PipelineResult {

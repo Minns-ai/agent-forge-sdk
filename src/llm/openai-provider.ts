@@ -114,8 +114,12 @@ function mapOpenAIStopReason(
   finishReason: string | undefined,
   hasToolCalls: boolean,
 ): LLMToolResponse["stopReason"] {
-  if (finishReason === "tool_calls" || hasToolCalls) return "tool_use";
+  // Truncation and the content filter are checked FIRST: either can arrive
+  // with a partial tool call attached, which must be reported as what it is
+  // rather than as a tool turn to execute.
+  if (finishReason === "content_filter") return "refusal";
   if (finishReason === "length") return "max_tokens";
+  if (finishReason === "tool_calls" || hasToolCalls) return "tool_use";
   return "end_turn";
 }
 

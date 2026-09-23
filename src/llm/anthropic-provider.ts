@@ -88,11 +88,16 @@ function toolResponseFromAnthropic(response: any, usage: TokenUsage): LLMToolRes
     }
   }
 
+  // The API's own stop reason is authoritative. It used to be overridden by
+  // "any tool call present means tool_use", which reported a turn cut off by
+  // max_tokens or a refusal as a normal tool turn, and the partial call ran.
   let stopReason: LLMToolResponse["stopReason"] = "end_turn";
-  if (response?.stop_reason === "tool_use" || toolCalls.length > 0) {
-    stopReason = "tool_use";
+  if (response?.stop_reason === "refusal") {
+    stopReason = "refusal";
   } else if (response?.stop_reason === "max_tokens") {
     stopReason = "max_tokens";
+  } else if (response?.stop_reason === "tool_use" || toolCalls.length > 0) {
+    stopReason = "tool_use";
   }
 
   return {

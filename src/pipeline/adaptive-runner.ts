@@ -54,6 +54,7 @@ import { defaultGoalChecker } from "./phases/goal-check-phase.js";
 import { compactMessages } from "./context-compaction.js";
 import { isContextLengthError, recoverContext, MAX_CONTEXT_RECOVERY } from "./context-recovery.js";
 import { noted } from "../utils/failure.js";
+import { judgeTurn, truncationFeedback, MAX_TRUNCATED_TURNS } from "../llm/turn-safety.js";
 
 // ─── Heuristic Router ─────────────────────────────────────────────────────────
 
@@ -746,7 +747,7 @@ export class AdaptiveRunner {
     emit({ type: "pipeline", data: pipelineSummary });
 
     const result: PipelineResult = {
-      success: pipelineState.stopReason !== "error",
+      success: pipelineState.stopReason !== "error" && pipelineState.stopReason !== "refused",
       message: responseMessage,
       intent: pipelineState.intent,
       memory: pipelineState.memory,
@@ -919,6 +920,7 @@ export class AdaptiveRunner {
     const callSig = (tc: { name: string; arguments: unknown }): string =>
       `${tc.name}:${JSON.stringify(tc.arguments ?? null)}`;
     const sigCounts = new Map<string, number>();
+    let truncatedTurns = 0;
     const MAX_IDENTICAL_CALLS = 3;
     // Set when the tool-path wrap-up below has already burned a recovery
     // completion, so the generic guarantee block doesn't fire a SECOND one.
@@ -983,6 +985,28 @@ export class AdaptiveRunner {
           messages = recovered.messages;
           const response = recovered.response;
           addUsage(response.usage);
+
+          // Judge the turn before any tool runs. See llm/turn-safety.ts: a
+          // refusal ends the run and is never a success; a turn cut off mid
+          // tool call carries a partial call that must not execute.
+          const verdict = judgeTurn(response);
+          if (verdict.kind === "refused") {
+            responseText = verdict.message;
+            stopReason = "refused";
+            break;
+          }
+          if (verdict.kind === "truncated") {
+            truncatedTurns++;
+            if (truncatedTurns > MAX_TRUNCATED_TURNS) {
+              stopReason = "error";
+              errors.push(`stopped: the model's tool calls kept exceeding its output limit (${verdict.tools.join(", ")})`);
+              break;
+            }
+            // Text only: a tool_use with no tool_result breaks native pairing.
+            messages.push({ role: "assistant", content: response.content || "(output cut off mid tool call)" });
+            messages.push({ role: "user", content: truncationFeedback(verdict.tools) });
+            continue;
+          }
 
           // Process any tool calls
           if (response.toolCalls.length > 0) {

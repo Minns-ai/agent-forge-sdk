@@ -22,6 +22,10 @@ src/
     openai-provider.ts  — OpenAI-compatible provider (fetch-based)
     anthropic-provider.ts — Anthropic native provider (lazy-loads @anthropic-ai/sdk)
     vcr.ts              — VCRProvider: record/replay wrapper for hermetic tests + eval oracle (InMemoryCassette, JSON persistence)
+    turn-safety.ts      : judgeTurn: a turn ending in refusal or max_tokens never runs its (possibly partial) tool
+                          calls, and a refusal is never reported as success. Both native loops consult it first
+    model-caps.ts       : which models accept temperature/top_p/top_k. Claude defaults to NO: only the older
+                          models listed there accept them, so a new release omits them instead of 400ing
     types.ts            — LLM-specific types
 
   tasks/

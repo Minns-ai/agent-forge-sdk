@@ -17,6 +17,7 @@ import { safeJsonParse } from "./utils/json.js";
 import { createResilientRunner, isTransientError, abortableDelay, AbortError } from "./llm/resilience.js";
 import type { ResilienceConfig } from "./llm/resilience.js";
 import { estimateCost } from "./llm/usage.js";
+import { judgeTurn, truncationFeedback, MAX_TRUNCATED_TURNS } from "./llm/turn-safety.js";
 import { estimateTokens, compactMessages } from "./pipeline/context-compaction.js";
 
 /**
@@ -532,7 +533,7 @@ export class SimpleAgent {
     const totalMs = Date.now() - startTime;
 
     return {
-      success: errors.length === 0,
+      success: errors.length === 0 && stopReason !== "refused",
       message: doneMessage,
       intent: null,
       memory: { claims: [] },
@@ -602,6 +603,7 @@ export class SimpleAgent {
     ];
     let verifyRounds = 0;
     const maxVerifyRounds = this.config.maxVerifyRounds ?? 2;
+    let truncatedTurns = 0;
 
     for (let step = 0; step < maxIterations; step++) {
       if (this.signal?.aborted) { stopReason = "aborted"; break; }
@@ -653,6 +655,32 @@ export class SimpleAgent {
         });
       } catch {
         /* observer errors never break the loop */
+      }
+
+      // Judge the turn BEFORE anything runs or is recorded. A refusal ends the
+      // run honestly (never "Task completed.", and never a verify round that
+      // pushes the model to keep going past its own decline). A turn that ran
+      // out of output mid tool call carries a partial call that must not run.
+      const verdict = judgeTurn(response);
+      if (verdict.kind === "refused") {
+        reasoning.push(`Step ${step + 1}: the model declined the request`);
+        doneMessage = verdict.message;
+        stopReason = "refused";
+        break;
+      }
+      if (verdict.kind === "truncated") {
+        truncatedTurns++;
+        reasoning.push(`Step ${step + 1}: output ran out mid tool call (${verdict.tools.join(", ")}); not executed`);
+        if (truncatedTurns > MAX_TRUNCATED_TURNS) {
+          errors.push(`stopped: the model's tool calls kept exceeding its output limit (${verdict.tools.join(", ")})`);
+          stopReason = "error";
+          break;
+        }
+        // The partial turn goes in as TEXT only. Recording its tool_use without
+        // a matching tool_result would break native pairing on the next call.
+        messages.push({ role: "assistant", content: response.content || "(output cut off mid tool call)" });
+        messages.push({ role: "user", content: truncationFeedback(verdict.tools) });
+        continue;
       }
 
       // Natural termination — the model answered without requesting tools. But
@@ -759,7 +787,7 @@ export class SimpleAgent {
     const totalMs = Date.now() - startTime;
 
     return {
-      success: errors.length === 0,
+      success: errors.length === 0 && stopReason !== "refused",
       message: doneMessage,
       intent: null,
       memory: { claims: [] },

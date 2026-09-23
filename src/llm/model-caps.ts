@@ -12,28 +12,55 @@
 // The fix belongs here — at the payload boundary — not in the failover
 // classifier.
 
-/** Model-id prefixes whose request surface no longer accepts sampling params. */
-const NO_SAMPLING_PARAMS = [
-  "claude-opus-5",
-  "claude-opus-4-8",
-  "claude-opus-4-7",
-  "claude-fable-5",
-  "claude-mythos-5",
-  "claude-sonnet-5",
+/** The Claude models that DO still accept sampling params.
+ *
+ *  This used to be the opposite list: the models that reject them, with
+ *  unknown models assumed to accept. That default was backwards for Claude.
+ *  Every generation since Opus 4.7 has removed the knobs, so the next model
+ *  released would have received `temperature` and answered every call with a
+ *  400, which the note above calls a hard outage no failover can route round.
+ *  Listing the OLD models instead makes an unknown new one default to omitting
+ *  the field, which at worst loses a caller's temperature tweak.
+ *
+ *  This list only shrinks. A new model is never added to it. */
+const CLAUDE_ACCEPTS_SAMPLING = [
+  "claude-3", // claude-3-opus, 3-5-sonnet, 3-7-sonnet, 3-haiku and dated ids
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-opus-4-1",
+  "claude-opus-4-0",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-sonnet-4-0",
+  "claude-haiku-4-5",
 ];
+
+/** Claude 4.0 shipped under bare and dated ids with no minor version:
+ *  `claude-opus-4`, `claude-opus-4-20250514`. Matched exactly or by the
+ *  8-digit date, never by a bare `claude-opus-4-` prefix, which would also
+ *  catch 4-7 and 4-8. */
+const CLAUDE_4_0 = /^claude-(opus|sonnet)-4(-\d{8})?$/;
+
+/** The Claude model name inside a provider-specific id, or null for a model
+ *  that is not Claude. Handles `anthropic/claude-x` (OpenRouter-style) and
+ *  `us.anthropic.claude-x-v1:0` (Bedrock-style), which a plain prefix check
+ *  missed entirely and so sent sampling params to. */
+const claudeName = (model: string): string | null => {
+  const i = model.indexOf("claude-");
+  return i >= 0 ? model.slice(i) : null;
+};
 
 /**
  * Whether `temperature` / `top_p` / `top_k` may be sent for this model.
  *
- * Matched by prefix so dated and vendor-prefixed ids resolve too
- * (`claude-opus-5-20260115`, `anthropic/claude-opus-5`). Unknown models are
- * assumed to accept sampling params — the conservative choice, since the
- * alternative silently drops a caller's explicit temperature.
+ * Non-Claude models are assumed to accept them, as before. Claude models
+ * accept them only if they are one of the older models listed above.
  */
 export function supportsSamplingParams(model: string): boolean {
-  const slash = model.lastIndexOf("/");
-  const bare = slash >= 0 ? model.slice(slash + 1) : model;
-  return !NO_SAMPLING_PARAMS.some((p) => bare.startsWith(p) || model.startsWith(p));
+  const name = claudeName(model);
+  if (name === null) return true;
+  if (CLAUDE_4_0.test(name)) return true;
+  return CLAUDE_ACCEPTS_SAMPLING.some((p) => name.startsWith(p));
 }
 
 /**

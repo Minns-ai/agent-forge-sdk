@@ -28,6 +28,41 @@ describe("supportsSamplingParams", () => {
     expect(supportsSamplingParams("anthropic/claude-haiku-4-5")).toBe(true);
   });
 
+  it("defaults an UNKNOWN Claude model to safe, since every new generation has removed the knobs", () => {
+    // The old denylist sent temperature to any model it did not recognise, so
+    // the next release would have 400'd on every call until someone noticed.
+    for (const m of ["claude-opus-6", "claude-sonnet-6", "claude-haiku-5", "claude-fable-6", "claude-opus-5-5", "claude-fable-5-1"]) {
+      expect(supportsSamplingParams(m), m).toBe(false);
+    }
+  });
+
+  it("still allows the older Claude models that accept them", () => {
+    for (const m of [
+      "claude-3-7-sonnet-latest", "claude-3-5-sonnet-20241022", "claude-3-haiku-20240307",
+      "claude-opus-4", "claude-opus-4-20250514", "claude-sonnet-4-20250514",
+      "claude-opus-4-1", "claude-opus-4-5", "claude-sonnet-4-5",
+    ]) {
+      expect(supportsSamplingParams(m), m).toBe(true);
+    }
+  });
+
+  it("never lets a bare 4.x prefix admit 4.7 or 4.8", () => {
+    expect(supportsSamplingParams("claude-opus-4-7-20260101")).toBe(false);
+    expect(supportsSamplingParams("claude-opus-4-8")).toBe(false);
+  });
+
+  it("reads Claude ids inside Bedrock-style provider ids, which the prefix check missed", () => {
+    expect(supportsSamplingParams("us.anthropic.claude-opus-4-8-v1:0")).toBe(false);
+    expect(supportsSamplingParams("anthropic.claude-sonnet-5")).toBe(false);
+    expect(supportsSamplingParams("anthropic.claude-3-5-sonnet-20240620-v1:0")).toBe(true);
+  });
+
+  it("leaves non-Claude models alone", () => {
+    for (const m of ["gpt-4o", "gpt-4.1-mini", "llama-3.1-70b", "mistral-large"]) {
+      expect(supportsSamplingParams(m), m).toBe(true);
+    }
+  });
+
   it("omits the field entirely rather than sending a default", () => {
     expect(samplingParams("claude-opus-5", 0.7)).toEqual({});
     expect(samplingParams("claude-opus-5", 0)).toEqual({});
