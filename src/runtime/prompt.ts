@@ -19,6 +19,12 @@ export interface AgentPromptConfig {
   version?: string;
   /** When the active prompt was last updated (ms epoch). */
   updatedAt?: number;
+  /** Text the platform runs after the prompt (the minns harness: how every
+   *  agent works, plus this agent's traits). `prompt` is the part opto
+   *  optimises; the harness is composed by the control plane and never
+   *  optimised. The agent joins the two itself, so a promoted prompt still
+   *  runs inside the harness. Absent from control planes that predate it. */
+  harness?: string;
 }
 
 /**
@@ -43,6 +49,7 @@ export async function fetchAgentPrompt(rails: MinnsRails): Promise<AgentPromptCo
       maxTokens: typeof body.maxTokens === "number" ? body.maxTokens : 1024,
       version: body.version,
       updatedAt: body.updatedAt,
+      ...(typeof body.harness === "string" ? { harness: body.harness } : {}),
     };
   } catch {
     return null;
