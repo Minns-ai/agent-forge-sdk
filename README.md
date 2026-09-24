@@ -977,49 +977,15 @@ failure classes) if message text must not leave the process.
 
 ## Browser
 
-`@minns/agent-forge/browser` gives an agent a browser it can use by saying
-what it wants, and a way to do the same task again reliably. Install
-`playwright-core` alongside it.
+A browser an agent can use by saying what it wants, with routines it can
+replay reliably, is its own package: [`@minns/browser`](https://github.com/Minns-ai/minns-browser).
+Its pilot takes any model with `complete(messages)`, so an agent-forge
+provider plugs straight in:
 
 ```ts
-import { chromium } from "playwright-core";
-import { BrowserPilot, PageDriver } from "@minns/agent-forge/browser";
-
-const page = await (await chromium.launch()).newPage();
-const pilot = new BrowserPilot({ driver: new PageDriver(page), llm });
-
-pilot.startRecording();
-await pilot.goto("https://example.com/login");
-await pilot.act("fill %email% into the email field", { variables: { email: "ann@example.com" } });
-await pilot.act("fill %pw% into the password field", { variables: { pw: { value: secret, secret: true } } });
-await pilot.act("click Continue");
-const total = await pilot.extract("the order total", { schema: { type: "object", required: ["total"] } });
-const routine = pilot.stopRecording({ name: "sign in and read the total" });
-
-// Later, for anyone: no model calls while the page still matches.
-const run = await pilot.replay(routine, { email: "bob@example.com", pw: { value: bobs, secret: true } });
+import { BrowserPilot, PageDriver } from "@minns/browser";
+const pilot = new BrowserPilot({ driver: new PageDriver(page), model: new AnthropicProvider({ ... }) });
 ```
-
-- **The page as an outline.** The browser's accessibility tree joined to the
-  DOM: roles and names as a person reads them, one id per line, iframes
-  (cross-site too) and shadow roots included.
-- **Every step finds its element again** before touching it, by position and
-  fingerprint together. A different control that took the recorded one's place
-  is refused, not clicked.
-- **Submits need approval.** A step that would send a form, pay, delete or
-  confirm returns `reason: "submits"` with the step to approve; `runStep(step,
-  { allowSubmit: true })` does exactly that step once a person agrees.
-- **Variables.** `%name%` placeholders: the model sees names, the page gets
-  values, and a secret is hidden wherever the page would show it back.
-- **Replay heals.** A moved element is found by what it is; a renamed one costs
-  one model call from the step's instruction, and the healed routine is
-  returned for next time. When nothing fits, the replay stops and says why.
-- **Two halves.** `BrowserPilot` thinks and holds the model; a `BrowserDriver`
-  holds the page and never calls a model. Implement the driver over any
-  transport (the minns workspace box does) to keep model keys out of the
-  browser's reach.
-
-The approach to page reading follows Stagehand (MIT, Browserbase).
 
 ---
 

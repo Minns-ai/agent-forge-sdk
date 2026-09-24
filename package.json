@@ -12,10 +12,6 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    },
-    "./browser": {
-      "import": "./dist/browser/index.js",
-      "types": "./dist/browser/index.d.ts"
     }
   },
   "files": [
@@ -42,8 +38,7 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.20.0",
-    "quickjs-emscripten": ">=0.31.0",
-    "playwright-core": ">=1.45.0"
+    "quickjs-emscripten": ">=0.31.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
@@ -51,14 +46,10 @@
     },
     "quickjs-emscripten": {
       "optional": true
-    },
-    "playwright-core": {
-      "optional": true
     }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "playwright-core": "^1.52.0",
     "quickjs-emscripten": "^0.32.0",
     "rimraf": "^5.0.0",
     "typescript": "^5.8.3",
