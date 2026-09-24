@@ -8,6 +8,10 @@ on:
 # write access to repo contents.
 permissions:
   contents: write
+  # npm trusted publishing: with this repo and workflow registered as the
+  # package's trusted publisher on npmjs.com, npm publishes over OIDC and no
+  # long-lived token is needed (npm now refuses tokens that do not bypass 2FA).
+  id-token: write
 
 jobs:
   publish:
@@ -29,6 +33,10 @@ jobs:
           # Node 18 crashed the test step at startup.
           node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - name: Update npm
+        run: npm install -g npm@^11.5.1
 
       - name: Install dependencies
         run: npm ci

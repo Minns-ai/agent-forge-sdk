@@ -89,7 +89,7 @@ describe.skipIf(!hasBrowser)("BrowserPilot", { timeout: 60_000 }, () => {
         <p id="pick">none</p>`,
       "/sent": (u) => `<!doctype html><title>Sent</title><p>Sent: ${u.searchParams.get("m")}</p>`,
     });
-  });
+  }, 60_000);
   afterAll(async () => {
     await browser?.close();
     await web?.close();

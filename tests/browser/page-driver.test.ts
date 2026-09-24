@@ -48,7 +48,7 @@ describe.skipIf(!hasBrowser)("PageDriver", { timeout: 30_000 }, () => {
       "/file": `<!doctype html><title>File</title><a href="/report.csv" download>Get the report</a><a href="/done?email=x&plan=y" target="_blank">Open elsewhere</a>`,
       "/report.csv": "a,b\n1,2\n",
     });
-  });
+  }, 60_000);
   afterAll(async () => {
     await browser?.close();
     await web?.close();
@@ -75,6 +75,54 @@ describe.skipIf(!hasBrowser)("PageDriver", { timeout: 30_000 }, () => {
     expect(sent).toMatchObject({ ok: true, title: "Done", found: "same" });
     view = await d.look();
     expect(view.outline).toContain("Thanks me@x.co on Pro");
+    await page.close();
+  });
+
+  it("shows an approver the form, and presses only if nothing changed since", async () => {
+    const page = await browser.newPage();
+    const d = new PageDriver(page);
+    await d.perform({ method: "goto", args: [`${web.base}/form`] });
+    let view = await d.look();
+    await d.perform({ method: "fill", id: idOf(view.outline, /textbox: Email/), args: ["me@x.co"] });
+    await d.perform({ method: "fill", id: idOf(view.outline, /textbox: Password/), args: ["pw"] });
+    const send = idOf(view.outline, /button: Send it/);
+    const seen = await d.inspect({ id: send });
+    if ("error" in seen) throw new Error(seen.error);
+    expect(seen).toMatchObject({ label: "Send it", enterSubmits: false });
+    expect(seen.fields).toMatchObject({ Email: "me@x.co", Password: "(hidden)", News: "unchecked" });
+    expect(seen.image).toMatch(/^data:image\/jpeg;base64,/);
+
+    // The agent changes the email after the person approved.
+    await d.perform({ method: "fill", id: idOf(view.outline, /textbox: Email/), args: ["other@x.co"] });
+    const stale = await d.perform({ method: "click", target: seen.target, allowSubmit: true, expect: { url: seen.url, fields: seen.fields } });
+    expect(stale).toMatchObject({ ok: false, reason: "lost" });
+    expect((stale as { error: string }).error).toContain('"Email" changed');
+
+    await d.perform({ method: "fill", id: idOf(view.outline, /textbox: Email/), args: ["me@x.co"] });
+    const sent = await d.perform({ method: "click", target: seen.target, allowSubmit: true, expect: { url: seen.url, fields: seen.fields } });
+    expect(sent).toMatchObject({ ok: true, title: "Done", submitted: true });
+
+    // Approved on one page, and the browser is elsewhere now.
+    const away = await d.perform({ method: "click", target: seen.target, allowSubmit: true, expect: { url: seen.url } });
+    expect(away).toMatchObject({ ok: false });
+    view = await d.look();
+    await page.close();
+  });
+
+  it("uploads only what the host allows", async () => {
+    const page = await browser.newPage();
+    await page.setContent('<input type="file" aria-label="Attach"><p id="n"></p><script>document.querySelector("input").onchange = (e) => document.getElementById("n").textContent = e.target.files[0].name</script>');
+    const none = new PageDriver(page);
+    let view = await none.look();
+    expect(await none.perform({ method: "upload", id: idOf(view.outline, /Attach/), args: ["x.txt"] })).toMatchObject({ ok: false, reason: "refused" });
+    const dir = mkdtempSync(path.join(tmpdir(), "up-"));
+    const file = path.join(dir, "notes.txt");
+    (await import("node:fs")).writeFileSync(file, "hi");
+    const d = new PageDriver(page, { resolveUpload: (p) => { if (p !== "notes.txt") throw new Error("upload takes a file inside the workspace"); return file; } });
+    view = await d.look();
+    expect(await d.perform({ method: "upload", id: idOf(view.outline, /Attach/), args: ["../etc/passwd"] })).toMatchObject({ ok: false, reason: "refused", error: "upload takes a file inside the workspace" });
+    expect((await d.perform({ method: "upload", id: idOf(view.outline, /Attach/), args: ["notes.txt"] })).ok).toBe(true);
+    expect((await d.look()).outline).toContain("notes.txt");
     await page.close();
   });
 

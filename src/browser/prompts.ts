@@ -17,7 +17,8 @@ const METHODS_NOTE = `The methods:
 - press: a key on the element; args [key], e.g. "Enter", "Tab", "ArrowDown", "Escape".
 - selectOption: chooses in a select element; args [the option's text].
 - check, uncheck: a checkbox or switch.
-- scrollIntoView: brings an element into view.`;
+- scrollIntoView: brings an element into view.
+- upload: puts a file into a file input; args [the file's path].`;
 
 const variablesNote = (variables?: Variables): string => {
   const list = describeVariables(variables);

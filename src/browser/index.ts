@@ -19,6 +19,7 @@ export {
   isPageMethod,
   type BrowserDriver,
   type DriverStep,
+  type Inspection,
   type ElementMethod,
   type Method,
   type PageMethod,

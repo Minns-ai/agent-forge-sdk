@@ -10,7 +10,7 @@ import type { Target } from "./fingerprint.js";
 /** The page-level steps, which act on no element. */
 export const PAGE_METHODS = ["goto", "back", "scroll", "wait"] as const;
 /** The element steps. */
-export const ELEMENT_METHODS = ["click", "doubleClick", "hover", "fill", "type", "press", "selectOption", "check", "uncheck", "scrollIntoView"] as const;
+export const ELEMENT_METHODS = ["click", "doubleClick", "hover", "fill", "type", "press", "selectOption", "check", "uncheck", "scrollIntoView", "upload"] as const;
 
 export type PageMethod = (typeof PAGE_METHODS)[number];
 export type ElementMethod = (typeof ELEMENT_METHODS)[number];
@@ -44,6 +44,25 @@ export interface DriverStep {
   /** How long to keep looking for a target that is not there yet (a page
    *  still loading). Default 0: look once. */
   waitMs?: number;
+  /** For an approved submit: what the person saw when they approved it. The
+   *  step presses only if the page is still that page, the control is
+   *  strictly the same one (see sameElement), and the form's values are
+   *  unchanged; the agent may have browsed on while it waited. */
+  expect?: { url: string; fields?: Record<string, string> };
+}
+
+/** What a submit is about to press, for the person asked to approve it. */
+export interface Inspection {
+  url: string;
+  title: string;
+  target: Target;
+  label: string;
+  /** Whether the element is a text field, where submitting means Enter. */
+  enterSubmits: boolean;
+  /** The form's values around the element, by label; secrets hidden. */
+  fields: Record<string, string>;
+  /** A screenshot (data: URL, JPEG) with the element outlined. */
+  image?: string;
 }
 
 export type StepOutcome =
@@ -85,4 +104,7 @@ export interface BrowserDriver {
   look(): Promise<PageView>;
   /** Take one step. Never throws: every failure is an outcome. */
   perform(step: DriverStep): Promise<StepOutcome>;
+  /** What an element step would press, for an approval. Optional: a driver
+   *  without it cannot show a person what they are approving. */
+  inspect?(ref: { id?: string; target?: Target }): Promise<Inspection | { error: string }>;
 }

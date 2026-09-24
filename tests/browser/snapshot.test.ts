@@ -5,7 +5,7 @@ import { chromiumPath, launch, site } from "./helpers.js";
 
 const hasBrowser = !!(await chromiumPath());
 
-describe.skipIf(!hasBrowser)("captureSnapshot", () => {
+describe.skipIf(!hasBrowser)("captureSnapshot", { timeout: 30_000 }, () => {
   let browser: Browser;
   let web: Awaited<ReturnType<typeof site>>;
 
@@ -26,7 +26,7 @@ describe.skipIf(!hasBrowser)("captureSnapshot", () => {
         <script>document.getElementById('host').attachShadow({mode:'open'}).innerHTML = '<button>In shadow</button>';</script>`,
       "/inner": `<!doctype html><button name="card">Card button</button>`,
     });
-  });
+  }, 60_000);
   afterAll(async () => {
     await browser?.close();
     await web?.close();

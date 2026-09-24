@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { Download, Frame, Locator, Page } from "playwright-core";
-import { isElementMethod, isPageMethod, type BrowserDriver, type DriverStep, type PageView, type StepOutcome } from "./driver.js";
-import type { Target } from "./fingerprint.js";
+import { isElementMethod, isPageMethod, type BrowserDriver, type DriverStep, type Inspection, type PageView, type StepOutcome } from "./driver.js";
+import { sameElement, type Target } from "./fingerprint.js";
 import { resolveTarget, type Resolution } from "./resolve.js";
 import { captureSnapshot, ownerOf, type PageSnapshot, type SnapshotElement } from "./snapshot.js";
 
@@ -33,6 +33,9 @@ export interface PageDriverOptions {
   downloadsDir?: string;
   /** How long one action may wait for its element to be ready. Default 10s. */
   timeoutMs?: number;
+  /** Where a file named for upload really is, or a throw when it may not be
+   *  uploaded (outside the workspace, say). Without it, upload is refused. */
+  resolveUpload?: (path: string) => string;
 }
 
 /** A cheap stable hash (FNV-1a): what is kept of a secret. */
@@ -248,6 +251,32 @@ export class PageDriver implements BrowserDriver {
     }
 
     const loc = await this.locate(snap, el);
+    if (commits && step.expect) {
+      // Approved against a page someone saw: press only if it is still that
+      // page, that control and those values.
+      if (!samePage(step.expect.url, snap.url)) {
+        return { ok: false, reason: "lost", error: `not submitted: the browser is on ${snap.url} now, not ${step.expect.url} where this was approved`, target: el.target, url: snap.url };
+      }
+      if (step.target && !sameElement(step.target.fp, el.target.fp)) {
+        return { ok: false, reason: "lost", error: `not submitted: the control that was approved ("${step.target.fp.label}") is not the one on the page now`, target: el.target, url: snap.url };
+      }
+      if (step.expect.fields) {
+        const now = await this.formFields(loc);
+        const changed = Object.entries(step.expect.fields).filter(([k, v]) => now[k] !== v).map(([k]) => k);
+        if (changed.length) {
+          return { ok: false, reason: "lost", error: `not submitted: ${changed.slice(0, 5).map((k) => JSON.stringify(k)).join(", ")} changed since this was approved`, target: el.target, url: snap.url };
+        }
+      }
+    }
+    let upload = "";
+    if (step.method === "upload") {
+      if (!this.opts.resolveUpload) return { ok: false, reason: "refused", error: "this browser takes no uploads" };
+      try {
+        upload = this.opts.resolveUpload(text);
+      } catch (e) {
+        return { ok: false, reason: "refused", error: firstLine(e) };
+      }
+    }
     const timeout = this.opts.timeoutMs ?? 10_000;
     this.submitting = commits;
     try {
@@ -285,6 +314,17 @@ export class PageDriver implements BrowserDriver {
           case "scrollIntoView":
             await loc.scrollIntoViewIfNeeded({ timeout });
             break;
+          case "upload": {
+            const isFile = await loc.evaluate((e) => e.tagName === "INPUT" && (e.getAttribute("type") ?? "").toLowerCase() === "file", undefined, { timeout }).catch(() => false);
+            if (isFile) await loc.setInputFiles(upload, { timeout });
+            else {
+              // A styled button that opens the file picker.
+              const chooser = this.page.waitForEvent("filechooser", { timeout });
+              await loc.click({ timeout });
+              await (await chooser).setFiles(upload);
+            }
+            break;
+          }
         }
       }, ["click", "doubleClick", "press"].includes(step.method));
       if (step.secret && (step.method === "fill" || step.method === "type")) this.secrets.add(text);
@@ -294,6 +334,80 @@ export class PageDriver implements BrowserDriver {
     } finally {
       this.submitting = false;
     }
+  }
+
+  async inspect(ref: { id?: string; target?: Target }): Promise<Inspection | { error: string }> {
+    try {
+      const snap = await this.snapshot();
+      const hit = this.find(snap, { method: "click", ...ref });
+      if (!hit) return { error: "that element is not on the page now" };
+      const el = hit.element;
+      const loc = await this.locate(snap, el);
+      const fields = await this.formFields(loc);
+      // The screenshot marks the control, so the approver sees which one.
+      await loc.evaluate((e) => {
+        const h = e as unknown as { style: { outline: string; outlineOffset: string } };
+        h.style.outline = "3px solid #e11d48";
+        h.style.outlineOffset = "2px";
+      }, undefined, { timeout: 2_000 }).catch(() => undefined);
+      await loc.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => undefined);
+      const image = await this.page.screenshot({ type: "jpeg", quality: 60 }).catch(() => null);
+      await loc.evaluate((e) => {
+        const h = e as unknown as { style: { outline: string; outlineOffset: string }; removeAttribute: (n: string) => void };
+        h.style.outline = "";
+        h.style.outlineOffset = "";
+        h.removeAttribute("data-minns-el");
+      }, undefined, { timeout: 1_000 }).catch(() => undefined);
+      return {
+        url: snap.url,
+        title: snap.title,
+        target: el.target,
+        label: el.name,
+        enterSubmits: el.enterSubmits,
+        fields,
+        ...(image && image.length < 400_000 ? { image: `data:image/jpeg;base64,${image.toString("base64")}` } : {}),
+      };
+    } catch (e) {
+      return { error: firstLine(e) };
+    }
+  }
+
+  /** The values in the form around an element (or the page's fields, with no
+   *  form), keyed by label: what a person approving a submit checks, and
+   *  what the submit checks again before pressing. Passwords and secrets
+   *  typed earlier read as hidden. */
+  private async formFields(loc: Locator): Promise<Record<string, string>> {
+    // Runs in the page. Typed loosely: this package compiles without the DOM
+    // library, and the page's own objects are all it touches.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const values = (await loc.evaluate((el: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const g: any = globalThis;
+      const form = el.form || el.closest("form");
+      const scope = form || el.getRootNode();
+      const out: Record<string, string> = {};
+      for (const f of Array.from(scope.querySelectorAll("input, select, textarea")) as any[]) {
+        const type = (f.getAttribute("type") || "").toLowerCase();
+        if (["hidden", "submit", "button", "image", "reset"].includes(type)) continue;
+        const id = f.getAttribute("id");
+        const byFor = id ? f.getRootNode().querySelector(`label[for="${g.CSS.escape(id)}"]`)?.textContent : null;
+        const label = String(f.getAttribute("aria-label") || byFor || f.closest("label")?.textContent || f.getAttribute("placeholder") || f.getAttribute("name") || type || f.tagName.toLowerCase())
+          .trim()
+          .replace(/\s+/g, " ")
+          .slice(0, 60);
+        let value: string;
+        if (type === "checkbox" || type === "radio") value = f.checked ? "checked" : "unchecked";
+        else if (f.tagName === "SELECT") value = f.selectedOptions[0]?.text ?? "";
+        else value = type === "password" ? (f.value ? "\u0000hidden" : "") : String(f.value);
+        let key = label;
+        for (let i = 2; key in out; i++) key = `${label} (${i})`;
+        out[key] = value;
+      }
+      return out;
+    }, undefined, { timeout: 2_000 })) as Record<string, string>;
+    const shown: Record<string, string> = {};
+    for (const [k, v] of Object.entries(values)) shown[k] = v === "\u0000hidden" || (v && this.secrets.has(v)) ? "(hidden)" : v.slice(0, 200);
+    return shown;
   }
 
   /** A Playwright locator for a snapshot element: mark the node through the
@@ -327,3 +441,15 @@ export class PageDriver implements BrowserDriver {
 }
 
 const descendants = (f: Frame): Frame[] => [f, ...f.childFrames().flatMap(descendants)];
+
+/** The same page for an approved submit: same origin and path (the query
+ *  aside, which sites reshuffle freely). */
+const samePage = (a: string, b: string): boolean => {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    return x.origin === y.origin && x.pathname.replace(/\/+$/, "") === y.pathname.replace(/\/+$/, "");
+  } catch {
+    return a === b;
+  }
+};
