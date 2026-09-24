@@ -36,6 +36,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The browser module is tested against a real Chromium; without one
+      # those tests skip, and a broken browser would ship green.
+      - name: Install Chromium for the browser tests
+        run: npx playwright-core install --with-deps chromium
+
       # Gate publishing on the test suite — a red build never ships to npm.
       - name: Test
         run: npm test

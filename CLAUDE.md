@@ -106,6 +106,23 @@ src/
                           asyncified host refs crashes). quickjs-emscripten is an optional peer, loaded on first use
       (todo-list, skills, subagents, summarization, eviction, HITL, prompt-cache, telemetry, minns-power, ...)
 
+  browser/              — @minns/agent-forge/browser (subpath export: its types need playwright-core, an optional peer,
+                          so it stays out of the main barrel). A browser an agent can use and repeat.
+    snapshot.ts         — captureSnapshot: the accessibility tree joined to the DOM, one outline with "<frame>-<node>" ids;
+                          same-site iframes and shadow roots in one DOM call, cross-site iframes from their own CDP session
+    fingerprint.ts      — Target (frame hops + XPath + Fingerprint); sameElement (strict, approvals), stillTheSame, couldBeMoved
+    resolve.ts          — resolveTarget: same id, same position while the fingerprint agrees, or the one element that is it moved;
+                          null rather than a guess
+    driver.ts           — BrowserDriver (look, perform): where the page is; never calls a model
+    page-driver.ts      — PageDriver over a Playwright page: re-finds every element before acting, refuses a submit without
+                          allowSubmit, answers dialogs, saves downloads, follows new tabs, hides secrets typed
+    prompts.ts          — act/observe/extract prompts and answer parsers (pure)
+    variables.ts        — %name% placeholders: the model sees names, the driver gets values
+    routine.ts          — Routine (minns.routine/1): steps with instruction, method, args, target; parseRoutine
+    pilot.ts            — BrowserPilot: act/observe/extract through any driver + LLMProvider; records steps; replay with no model
+                          while the page matches, one model call to heal a lost step, a stop with the step to approve on a submit
+                          Technique after Stagehand (MIT); tests run a real Chromium (tests/browser, skipped without one)
+
   events/
     emitter.ts          — AgentEventEmitter: typed events, callback + async iterable
 
@@ -300,7 +317,7 @@ execute → result size-cap, and never throws.
 
 ## Important Notes
 
-- `minns-sdk` (^0.8.6) is a runtime dependency; `@anthropic-ai/sdk` and `quickjs-emscripten` are optional peer dependencies (lazy-loaded)
+- `minns-sdk` (^0.8.6) is a runtime dependency; `@anthropic-ai/sdk`, `quickjs-emscripten` and `playwright-core` are optional peer dependencies (lazy-loaded, or types only)
 - All imports between source files use `.js` extensions (Node16 module resolution)
 - The `dist/` directory is the only thing shipped to npm (plus `.claude/` for the skill)
 - Test suite lives in `tests/` (vitest); `npm test` runs it and publishing is gated on it
