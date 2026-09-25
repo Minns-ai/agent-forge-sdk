@@ -978,7 +978,7 @@ failure classes) if message text must not leave the process.
 ## Browser
 
 A browser an agent can use by saying what it wants, with routines it can
-replay reliably, is its own package: [`@minns/browser`](https://github.com/Minns-ai/minns-browser).
+replay reliably, is its own package: [`@minns/browser`](https://github.com/Minns-ai/Minns-ai-minns-browser).
 Its pilot takes any model with `complete(messages)`, so an agent-forge
 provider plugs straight in:
 

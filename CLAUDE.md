@@ -300,7 +300,7 @@ execute → result size-cap, and never throws.
 
 ## Important Notes
 
-- `minns-sdk` (^0.8.6) is a runtime dependency; `@anthropic-ai/sdk` and `quickjs-emscripten` are optional peer dependencies (lazy-loaded). The agent browser is its own package, `@minns/browser` (repo Minns-ai/minns-browser); its `Model` interface is met by any `LLMProvider` here
+- `minns-sdk` (^0.8.6) is a runtime dependency; `@anthropic-ai/sdk` and `quickjs-emscripten` are optional peer dependencies (lazy-loaded). The agent browser is its own package, `@minns/browser` (repo Minns-ai/Minns-ai-minns-browser); its `Model` interface is met by any `LLMProvider` here
 - All imports between source files use `.js` extensions (Node16 module resolution)
 - The `dist/` directory is the only thing shipped to npm (plus `.claude/` for the skill)
 - Test suite lives in `tests/` (vitest); `npm test` runs it and publishing is gated on it
