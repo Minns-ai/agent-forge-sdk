@@ -126,16 +126,17 @@ describe("SimpleMemoryMiddleware", () => {
 describe("MinnsSimpleClient", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("sends the token, puts id filters in the query, and raises the service's error", async () => {
+  it("sends the store's secret and the agent's token, puts id filters in the query, and raises the store's error", async () => {
     const seen: Array<{ url: string; init: any }> = [];
     vi.stubGlobal("fetch", async (url: string, init: any) => {
       seen.push({ url, init });
       return url.includes("missing") ? new Response(JSON.stringify({ error: "Memory not found." }), { status: 404 }) : new Response(JSON.stringify({ deleted: 1 }));
     });
-    const c = new MinnsSimpleClient({ baseUrl: "https://simple.example/", token: () => "tok" });
+    const c = new MinnsSimpleClient({ baseUrl: "https://simple.example/", token: "store-secret", agentToken: () => "agent-tok" });
     await c.delete("m1", { user_id: ["ana", null] });
     expect(seen[0]?.url).toBe(`https://simple.example/v1/memories/m1?filters=${encodeURIComponent('{"user_id":["ana",null]}')}`);
-    expect(seen[0]?.init.headers.Authorization).toBe("Bearer tok");
+    expect(seen[0]?.init.headers.Authorization).toBe("Bearer store-secret");
+    expect(seen[0]?.init.headers["X-Minns-Agent-Token"]).toBe("agent-tok");
     await expect(c.get("missing")).rejects.toMatchObject({ status: 404, message: "Memory not found." });
   });
 });

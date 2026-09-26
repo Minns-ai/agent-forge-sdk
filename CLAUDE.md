@@ -40,8 +40,9 @@ src/
     memory-manager.ts   — MemoryManager: searchClaims + query in parallel
     context-ranker.ts   — selectBestContext() ranks claims by confidence
     fact-extractor.ts   — extractFactsFromClaims (subject-predicate-object → key/value)
-    simple-client.ts    : MinnsSimpleClient for minns-simple (Simple memory: scoped, time-aware facts in the
-                          account's Qdrant). Filters: omitted = all, value or list = any of, null = untagged
+    simple-client.ts    : MinnsSimpleClient for a memory store (minns-simple: scoped, time-aware facts; each store
+                          the customer's own). Sends the store's secret + the agent's token. Filters: omitted =
+                          all, value or list = any of, null = untagged, metadata operators as mem0
 
   session/
     session-store.ts    — SessionStore interface

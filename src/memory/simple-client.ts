@@ -9,8 +9,10 @@
  * `metadata` filters on a memory's own flat metadata fields, as mem0 does:
  * `{ metadata: { plan: { in: ["pro", "business"] }, seats: { gte: 5 } } }`.
  *
- * Every call carries the agent's token; the platform resolves it to the
- * account, the agent and its Qdrant connection, and meters the embeddings.
+ * A memory store is the customer's own deployment. Every call carries the
+ * store's secret and the calling agent's token: the store asks the platform
+ * which agent that is (refusing agents of other accounts) and the platform
+ * meters embeddings and extraction to it.
  */
 
 export type SimpleTag = "group_id" | "agent_id" | "user_id" | "session_id";
@@ -70,9 +72,12 @@ export class SimpleMemoryError extends Error {
 }
 
 export interface MinnsSimpleClientOptions {
+  /** The memory store's address. */
   baseUrl: string;
-  /** The agent's token, or a function that reads it per call. */
-  token: string | (() => string);
+  /** The memory store's secret. */
+  token: string;
+  /** The calling agent's token, or a function that reads it per call. */
+  agentToken: string | (() => string);
   timeoutMs?: number;
 }
 
@@ -84,10 +89,10 @@ export class MinnsSimpleClient {
   }
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const token = typeof this.opts.token === "function" ? this.opts.token() : this.opts.token;
+    const agentToken = typeof this.opts.agentToken === "function" ? this.opts.agentToken() : this.opts.agentToken;
     const res = await fetch(`${this.base}${path}`, {
       method,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.opts.token}`, "X-Minns-Agent-Token": agentToken },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
     });
