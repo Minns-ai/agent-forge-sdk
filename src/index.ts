@@ -260,6 +260,7 @@ export type {
   SimpleFilter,
   SimpleKey,
   SimpleMemoryItem,
+  SimpleMetadataFilter,
   SimpleScope,
   SimpleSearch,
   SimpleTag,

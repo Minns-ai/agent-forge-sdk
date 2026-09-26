@@ -6,6 +6,8 @@
  * filters on any of them: omitted means all, a value or a list means any of
  * them, and `null` in a list means untagged, so `{ user_id: ["u1", null] }`
  * is that user's memories plus shared knowledge, never another user's.
+ * `metadata` filters on a memory's own flat metadata fields, as mem0 does:
+ * `{ metadata: { plan: { in: ["pro", "business"] }, seats: { gte: 5 } } }`.
  *
  * Every call carries the agent's token; the platform resolves it to the
  * account, the agent and its Qdrant connection, and meters the embeddings.
@@ -13,7 +15,10 @@
 
 export type SimpleTag = "group_id" | "agent_id" | "user_id" | "session_id";
 export type SimpleScope = Partial<Record<SimpleTag, string | null>>;
-export type SimpleFilter = Partial<Record<SimpleTag, string | null | Array<string | null>>>;
+/** A metadata filter: a field and a value (equal), or operators eq, ne, in,
+ *  nin, gt, gte, lt, lte, contains, exists; combine with AND / OR / NOT. */
+export type SimpleMetadataFilter = Record<string, unknown>;
+export type SimpleFilter = Partial<Record<SimpleTag, string | null | Array<string | null>>> & { metadata?: SimpleMetadataFilter };
 
 export interface SimpleMemoryItem {
   id: string;
