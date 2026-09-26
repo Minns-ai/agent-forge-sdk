@@ -252,6 +252,19 @@ export { MiddlewareStack } from "./middleware/stack.js";
 export { ContextSummarizationMiddleware } from "./middleware/builtin/context-summarization.js";
 export type { ContextSummarizationConfig, ContextSize, TruncateArgsSettings } from "./middleware/builtin/context-summarization.js";
 export { TodoListMiddleware } from "./middleware/builtin/todo-list.js";
+export { SimpleMemoryMiddleware } from "./middleware/builtin/simple-memory.js";
+export type { SimpleMemoryConfig, SimpleMemoryScope } from "./middleware/builtin/simple-memory.js";
+export { MinnsSimpleClient, SimpleMemoryError } from "./memory/simple-client.js";
+export type {
+  MinnsSimpleClientOptions,
+  SimpleFilter,
+  SimpleKey,
+  SimpleMemoryItem,
+  SimpleScope,
+  SimpleSearch,
+  SimpleTag,
+  SimpleWrite,
+} from "./memory/simple-client.js";
 export type { TodoItem, TodoState } from "./middleware/builtin/todo-list.js";
 export { PromptCacheMiddleware } from "./middleware/builtin/prompt-cache.js";
 export type { PromptCacheConfig } from "./middleware/builtin/prompt-cache.js";

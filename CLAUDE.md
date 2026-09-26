@@ -40,6 +40,8 @@ src/
     memory-manager.ts   — MemoryManager: searchClaims + query in parallel
     context-ranker.ts   — selectBestContext() ranks claims by confidence
     fact-extractor.ts   — extractFactsFromClaims (subject-predicate-object → key/value)
+    simple-client.ts    : MinnsSimpleClient for minns-simple (Simple memory: scoped, time-aware facts in the
+                          account's Qdrant). Filters: omitted = all, value or list = any of, null = untagged
 
   session/
     session-store.ts    — SessionStore interface
@@ -98,6 +100,9 @@ src/
                           MINNS_SANDBOX_URL/TOKEN rails by default (readWorkspaceEnv in runtime/env.ts); null without a box.
                           A host that registers (and wraps) the tools itself passes `behaviour` (withoutTools) to
                           AgentForge: the prompt, the result offload and the per-run reads, without the tools twice
+      simple-memory.ts  : SimpleMemoryMiddleware: recalls the run's memories into the prompt (inside <minns-memories>,
+                          which minns-simple leaves out when it extracts), remember/recall/forget tools in the run's
+                          scope, and in auto mode sends each finished exchange for background extraction
       code-mode.ts      — CodeModeMiddleware: programmatic tool calling. `run_code` runs a JavaScript program in a
                           QuickJS sandbox (no host access) where tools.<name>(args) calls a disclosed tool through
                           ToolRegistry.execute (validate/authorize/approval/cap all apply); synchronous from the
