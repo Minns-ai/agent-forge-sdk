@@ -57,6 +57,10 @@ export interface ServeAgentOptions {
   onExecuteCandidate?: (req: ExecuteCandidateRequest) => Promise<ExecuteCandidateResponse>;
   /** Port to listen on. Defaults to PORT env or 8080 (matches the deploy default). */
   port?: number;
+  /** Address to listen on. Defaults to every interface. Pass "127.0.0.1" when a
+   *  front server on the same machine (an auth proxy) is the only caller, so the
+   *  unauthenticated port is not reachable from the network. */
+  host?: string;
   /** Env source (defaults to process.env). */
   env?: NodeJS.ProcessEnv;
   /** Provide a TelemetryReporter explicitly (otherwise built from the rails). */
@@ -325,7 +329,7 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
   });
 
   return new Promise((resolve) => {
-    server.listen(port, () => {
+    server.listen({ port, host: opts.host }, () => {
       logs?.log(`agent serving on :${port}${rails.agentId ? ` (agent ${rails.agentId})` : ""}`);
       resolve({
         port,
