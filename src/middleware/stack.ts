@@ -93,6 +93,12 @@ export class MiddlewareStack {
     return this.middlewares.some((mw) => typeof mw.wrapModelCall === "function");
   }
 
+  /** True when a reply may stream through every registered `wrapModelCall`:
+   *  none wraps the model call, or every one that does is `streamSafe`. */
+  get canStreamThrough(): boolean {
+    return this.middlewares.every((mw) => typeof mw.wrapModelCall !== "function" || mw.streamSafe === true);
+  }
+
   /** True when at least one registered middleware wraps tool calls. */
   get hasWrapToolCall(): boolean {
     return this.middlewares.some((mw) => typeof mw.wrapToolCall === "function");
@@ -305,6 +311,10 @@ export class MiddlewareStack {
     defaultTools: import("../types.js").LLMToolSpec[],
     state: PipelineState,
     context: MiddlewareContext,
+    /** Where the reply's text goes as the model writes it. Set only when every
+     *  middleware here is `streamSafe` (see canStreamThrough): the terminal
+     *  then streams, and still returns the whole response up the onion. */
+    onDelta?: (delta: string) => void,
   ): NextFn {
     const terminal: NextFn = async (request: ModelRequest): Promise<ModelResponse> => {
       const modifiedMessages = this.applySystemPromptModifications(request.messages, state);
@@ -313,11 +323,22 @@ export class MiddlewareStack {
         : { metadata: request.metadata };
 
       const t0 = performance.now();
-      const response = await llm.completeWithTools!(
-        modifiedMessages,
-        request.tools ?? defaultTools,
-        options,
-      );
+      const tools = request.tools ?? defaultTools;
+      let response: import("../types.js").LLMToolResponse;
+      if (onDelta && llm.streamWithTools) {
+        let final: import("../types.js").LLMToolResponse | null = null;
+        for await (const ev of llm.streamWithTools(modifiedMessages, tools, options)) {
+          if (ev.type === "text_delta") {
+            if (ev.delta) onDelta(ev.delta);
+          } else if (ev.type === "done") {
+            final = ev.response;
+          }
+        }
+        if (!final) throw new Error("streamWithTools ended without a done event");
+        response = final;
+      } else {
+        response = await llm.completeWithTools!(modifiedMessages, tools, options);
+      }
       const duration = Math.round(performance.now() - t0);
 
       return {

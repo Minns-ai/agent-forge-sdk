@@ -118,6 +118,8 @@ function buildPreview(
  */
 export class ToolResultEvictionMiddleware implements Middleware {
   readonly name = "tool-result-eviction";
+  // Changes only the request (and adds metadata): replies stream through it.
+  readonly streamSafe = true;
 
   private maxResultLength: number;
   private previewHeadLines: number;

@@ -250,6 +250,17 @@ export interface Middleware {
   readonly tools?: ToolDefinition[];
 
   /**
+   * True when this middleware's `wrapModelCall` only changes the request, or
+   * reads the response without changing its text. The reply may then stream
+   * to the caller as the model writes it, through this middleware: it still
+   * sees the whole response once the call ends. Leave it unset for anything
+   * that rewrites what the model said (a redactor, a formatter): with any such
+   * middleware installed the run does not stream, so nothing leaves before it
+   * has been rewritten.
+   */
+  readonly streamSafe?: boolean;
+
+  /**
    * Called once before the pipeline starts executing.
    *
    * Use for:

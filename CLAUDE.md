@@ -124,7 +124,9 @@ src/
     approval.ts         — createHttpApprovalHandler: HITL → control-plane approval queue
     durable.ts          — createGraphStepHandler: maps invoke/checkpoint/interrupt → step contract
     serve.ts            — serveAgent(): HTTP harness exposing /v1/invoke + /healthz
-                          (+ /v1/execute-candidate when onExecuteCandidate is supplied)
+                          (+ /v1/execute-candidate when onExecuteCandidate is supplied). A caller that
+                          accepts application/x-ndjson gets {"type":"delta"} lines as the reply is written,
+                          then one {"type":"result"}; a caller hanging up aborts the run (StepContext.signal)
     prompt.ts           — fetchAgentPrompt / PromptProvider: the opto-optimised prompt, served back
     trace-attrs.ts      — span vocabulary (gen_ai.* / minns.* keys, span names) opto and the control plane read
     traced-provider.ts  — tracedProvider(): one llm.call span per provider call (messages, tools, output, tokens)

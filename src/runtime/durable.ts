@@ -11,7 +11,16 @@ import type { InvokeRequest, InvokeResponse } from "./contract.js";
 
 /** A single function that advances a run one turn. Implement directly for full
  *  control, or build one from a graph with {@link createGraphStepHandler}. */
-export type StepHandler = (req: InvokeRequest) => Promise<InvokeResponse>;
+/** What the harness hands a step besides the request. */
+export interface StepContext {
+  /** Aborts when the caller hangs up (the person pressed Stop): the run
+   *  should stop spending and acting. */
+  signal?: AbortSignal;
+  /** The reply's text as it is written, when the caller asked for a stream. */
+  onDelta?: (delta: string) => void;
+}
+
+export type StepHandler = (req: InvokeRequest, ctx?: StepContext) => Promise<InvokeResponse>;
 
 export interface GraphStepHandlerConfig<S> {
   /** The compiled graph (must be compiled with a Checkpointer for resume). */

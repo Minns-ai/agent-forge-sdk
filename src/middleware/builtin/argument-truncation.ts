@@ -111,6 +111,8 @@ function truncateArg(value: string, maxLength: number, suffix: string): string {
  */
 export class ArgumentTruncationMiddleware implements Middleware {
   readonly name = "argument-truncation";
+  // Changes only the request (and adds metadata): replies stream through it.
+  readonly streamSafe = true;
 
   private triggerTokens: number;
   private keepRecentMessages: number;

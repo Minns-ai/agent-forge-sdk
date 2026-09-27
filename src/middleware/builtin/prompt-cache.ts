@@ -98,6 +98,8 @@ function hashString(str: string): string {
  */
 export class PromptCacheMiddleware implements Middleware {
   readonly name = "prompt-cache";
+  // Changes only the request (and adds metadata): replies stream through it.
+  readonly streamSafe = true;
 
   private minSystemPromptLength: number;
   private cachePurposes: Set<string> | null;

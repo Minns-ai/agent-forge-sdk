@@ -33,7 +33,7 @@ export { createHttpApprovalHandler, approvalHandlerFromRails } from "./approval.
 export type { HttpApprovalConfig } from "./approval.js";
 
 export { createGraphStepHandler } from "./durable.js";
-export type { StepHandler, GraphStepHandlerConfig } from "./durable.js";
+export type { StepContext, StepHandler, GraphStepHandlerConfig } from "./durable.js";
 
 export { fetchAgentPrompt, PromptProvider } from "./prompt.js";
 export type { AgentPromptConfig } from "./prompt.js";
@@ -46,7 +46,7 @@ export type { ContentCapture } from "./trace-attrs.js";
 export { withRun, ensureRun, currentRun, currentRunId } from "../utils/run-context.js";
 export type { RunContext } from "../utils/run-context.js";
 
-export { serveAgent } from "./serve.js";
+export { serveAgent, NDJSON } from "./serve.js";
 export type { ServeAgentOptions, AgentServer } from "./serve.js";
 
 export { buildAgentCard, messageText, runIdForContext } from "./a2a.js";

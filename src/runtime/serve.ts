@@ -5,7 +5,7 @@ import type {
   ExecuteCandidateRequest,
   ExecuteCandidateResponse,
 } from "./contract.js";
-import type { StepHandler } from "./durable.js";
+import type { StepContext, StepHandler } from "./durable.js";
 import { readMinnsEnv, type MinnsRails } from "./env.js";
 import { telemetryFromRails, type TelemetryReporter } from "./otlp.js";
 import { withRun } from "../utils/run-context.js";
@@ -111,6 +111,12 @@ const readJsonBody = (req: IncomingMessage): Promise<unknown> =>
     req.on("error", reject);
   });
 
+/** The streamed invoke's content type (see the /v1/invoke route). */
+export const NDJSON = "application/x-ndjson";
+
+/** Whether the caller asked for the reply as it is written. */
+const wantsStream = (req: IncomingMessage): boolean => String(req.headers.accept ?? "").includes(NDJSON);
+
 const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -160,20 +166,48 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
           resume: b.resume === true,
         };
 
+        // The caller hanging up (the person pressed Stop, or the control plane
+        // gave up) stops the run: it should not go on spending and acting for
+        // nobody.
+        const hangUp = new AbortController();
+        res.on("close", () => {
+          if (!res.writableFinished) hangUp.abort();
+        });
+        // A caller that accepts NDJSON gets the reply as it is written: one
+        // {"type":"delta","text":...} line per piece, then one
+        // {"type":"result",...InvokeResponse} (or {"type":"error"}) line.
+        const streaming = wantsStream(req);
+        if (streaming) {
+          res.writeHead(200, { "Content-Type": NDJSON, "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
+          res.flushHeaders?.();
+        }
+        const line = (o: unknown) => {
+          if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(o)}\n`);
+        };
+        const ctx: StepContext = {
+          signal: hangUp.signal,
+          ...(streaming ? { onDelta: (text: string) => text && line({ type: "delta", text }) } : {}),
+        };
+
         let result: InvokeResponse;
         try {
-          result = await withRun(request.run_id, () => opts.handler(request));
+          result = await withRun(request.run_id, () => opts.handler(request, ctx));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logs?.log(`invoke error for run ${request.run_id}: ${message}`, "stderr");
           telemetry?.span("agent.invoke", {
             startTimeMs: start,
             endTimeMs: Date.now(),
-            attributes: { "minns.run.id": request.run_id, "minns.run.step": request.step ?? 0 },
+            attributes: { "minns.run.id": request.run_id, "minns.run.step": request.step ?? 0, "minns.run.cancelled": hangUp.signal.aborted },
             error: message,
           });
           await telemetry?.flush();
-          sendJson(res, 500, { error: message });
+          if (streaming) {
+            line({ type: "error", error: message });
+            res.end();
+          } else {
+            sendJson(res, 500, { error: message });
+          }
           return;
         }
 
@@ -189,7 +223,12 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
           },
         });
         await telemetry?.flush();
-        sendJson(res, 200, result);
+        if (streaming) {
+          line({ type: "result", ...result });
+          res.end();
+        } else {
+          sendJson(res, 200, result);
+        }
         return;
       }
 

@@ -56,6 +56,8 @@ import type { LLMMessage } from "../../types.js";
  */
 export class PatchToolCallsMiddleware implements Middleware {
   readonly name = "patch-tool-calls";
+  // Changes only the request (and adds metadata): replies stream through it.
+  readonly streamSafe = true;
 
   private totalPatched = 0;
 

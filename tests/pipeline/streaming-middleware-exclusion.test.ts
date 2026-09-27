@@ -19,7 +19,9 @@ import type {
 // tool-call patching on the default path.
 //
 // The rule now: stream only when (a) an emitter is subscribed for this run AND
-// (b) no wrapModelCall middleware is registered.
+// (b) every wrapModelCall middleware is streamSafe. A streamSafe onion streams
+// from its terminal and still sees the whole response; a middleware that may
+// rewrite replies (not streamSafe) turns streaming off.
 
 const answerTool: ToolDefinition = buildTool({
   name: "lookup",
@@ -119,6 +121,49 @@ describe("agentic loop — streaming vs wrapModelCall middleware", () => {
     expect(result.message).toBe("The answer is 42.");
   });
 
+  it("streams THROUGH the onion when every wrapModelCall middleware is streamSafe", async () => {
+    const { llm, calls } = makeProvider();
+    const seenResponses: string[] = [];
+    const mw: Middleware = {
+      name: "request-only",
+      streamSafe: true,
+      async wrapModelCall(request: ModelRequest, next: NextFn): Promise<ModelResponse> {
+        const response = await next({ ...request, metadata: { ...request.metadata, touched: true } });
+        seenResponses.push(response.content);
+        return response;
+      },
+    };
+    const agent = new AgentForge({
+      directive: { identity: "T", goalDescription: "g", maxIterations: 5 },
+      llm,
+      tools: [answerTool],
+      middleware: [mw],
+    });
+
+    const deltas: string[] = [];
+    const result = await agent.runWithEvents(
+      "answer the question",
+      (event) => {
+        if (event.type === "stream_chunk") deltas.push(event.data.delta);
+      },
+      { sessionId: 4 },
+    );
+
+    expect(calls.stream).toBeGreaterThan(0);
+    expect(calls.tools).toBe(0);
+    expect(deltas.join("")).toBe("The answer is 42.");
+    // The middleware still saw the whole response.
+    expect(seenResponses).toContain("The answer is 42.");
+    expect(result.message).toBe("The answer is 42.");
+  });
+
+  it("marks the built-in request-only middleware streamSafe", async () => {
+    const m = await import("../../src/index.js");
+    for (const Mw of [m.ContextSummarizationMiddleware, m.ToolResultEvictionMiddleware, m.ArgumentTruncationMiddleware, m.PromptCacheMiddleware, m.PatchToolCallsMiddleware]) {
+      expect(new (Mw as new (c?: object) => { streamSafe?: boolean })({}).streamSafe).toBe(true);
+    }
+  });
+
   it("does not stream when there is no emitter (agent.run)", async () => {
     const { llm, calls } = makeProvider();
     const agent = new AgentForge({
@@ -146,5 +191,15 @@ describe("MiddlewareStack.hasWrapModelCall", () => {
 
     stack.use(makeWrapMiddleware().mw);
     expect(stack.hasWrapModelCall).toBe(true);
+  });
+
+  it("can stream through only while every wrapModelCall middleware is streamSafe", async () => {
+    const { MiddlewareStack } = await import("../../src/middleware/stack.js");
+    const stack = new MiddlewareStack();
+    expect(stack.canStreamThrough).toBe(true);
+    stack.use({ name: "safe", streamSafe: true, async wrapModelCall(r, next) { return next(r); } });
+    expect(stack.canStreamThrough).toBe(true);
+    stack.use(makeWrapMiddleware().mw);
+    expect(stack.canStreamThrough).toBe(false);
   });
 });

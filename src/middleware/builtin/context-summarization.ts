@@ -213,6 +213,8 @@ const COMPACT_TOOL_SYSTEM_PROMPT =
  */
 export class ContextSummarizationMiddleware implements Middleware {
   readonly name = "context-summarization";
+  // Changes only the request (and adds metadata): replies stream through it.
+  readonly streamSafe = true;
   readonly tools: ToolDefinition[];
 
   private tokenBudget: number;

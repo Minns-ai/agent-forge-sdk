@@ -548,14 +548,13 @@ export class AdaptiveRunner {
 
     const emit = (event: AgentEvent) => emitter?.emit(event);
 
-    // Should this run take the provider's STREAMING path? Only when the deltas
-    // have somewhere to go (an emitter was supplied — `agent.run()` passes
-    // none) AND no middleware wraps the model call. Streamed calls bypass the
-    // `wrapModelCall` onion, so with e.g. PromptCacheMiddleware installed
-    // streaming would silently disable caching and every other wrapModelCall
-    // middleware. Correctness wins over time-to-first-token until the onion
-    // can carry a stream (see runAgenticLoop's onDelta comment).
-    const streamToEmitter = emitter !== undefined && !this.middlewareStack.hasWrapModelCall;
+    // Should this run stream the reply as it is written? Only when the deltas
+    // have somewhere to go (an emitter was supplied; `agent.run()` passes
+    // none) AND every middleware that wraps the model call is streamSafe: the
+    // tool-calling terminal then streams while the onion still sees the whole
+    // response, so caching, summarization and the rest keep working. One
+    // middleware that rewrites replies turns streaming off for the run.
+    const streamToEmitter = emitter !== undefined && this.middlewareStack.canStreamThrough;
 
     // ── Build PipelineState ──────────────────────────────────────────────
     const pipelineState: PipelineState = {
@@ -649,6 +648,7 @@ export class AdaptiveRunner {
         buildToolSpecs(this.toolRegistry, disclosedNames(this.toolRegistry)),
         pipelineState,
         middlewareContext,
+        streamToEmitter && this.llm.streamWithTools ? (delta: string) => emit({ type: "stream_chunk", data: { delta } }) : undefined,
       );
     }
 
@@ -805,29 +805,17 @@ export class AdaptiveRunner {
     for (let attempt = 0; ; attempt++) {
       try {
         // Three call paths, in preference order:
-        // 1. streamWithTools when the provider supports it AND a delta consumer
-        //    is attached — the answer streams token-by-token (stream_chunk
-        //    events), so time-to-first-token stops being total run time. The
-        //    caller only attaches `onDelta` when no wrapModelCall middleware is
-        //    registered, because streamed calls bypass the request/response
-        //    onion (a stream cannot flow through a NextFn that returns a whole
-        //    ModelResponse); system-prompt modifications are applied here
-        //    through promptFor, since the terminal that applies them is skipped.
-        // 2. The middleware onion (via) for non-streaming tool calls.
+        // 1. The middleware onion (via), when there is one. Its terminal
+        //    streams the reply (stream_chunk events) when the run streams and
+        //    every wrapModelCall middleware is streamSafe, so caching,
+        //    summarization and the rest still see every call.
+        // 2. streamWithTools directly, when nothing wraps the call and a delta
+        //    consumer is attached, so time-to-first-token stops being total
+        //    run time. System-prompt modifications are applied through
+        //    promptFor, since the terminal that applies them is not in play.
         // 3. Direct provider call.
         let response: LLMToolResponse;
-        if (onDelta && this.llm.streamWithTools) {
-          let final: LLMToolResponse | null = null;
-          for await (const ev of this.llm.streamWithTools(promptFor(current), toolSpecs, options)) {
-            if (ev.type === "text_delta") {
-              if (ev.delta) onDelta(ev.delta);
-            } else if (ev.type === "done") {
-              final = ev.response;
-            }
-          }
-          if (!final) throw new Error("streamWithTools ended without a done event");
-          response = final;
-        } else if (via) {
+        if (via) {
           const wrapped = await via({
             messages: current,
             tools: toolSpecs,
@@ -841,6 +829,17 @@ export class AdaptiveRunner {
             stopReason: wrapped.stopReason ?? ((wrapped.toolCalls?.length ?? 0) > 0 ? "tool_use" : "end_turn"),
             usage: wrapped.usage,
           };
+        } else if (onDelta && this.llm.streamWithTools) {
+          let final: LLMToolResponse | null = null;
+          for await (const ev of this.llm.streamWithTools(promptFor(current), toolSpecs, options)) {
+            if (ev.type === "text_delta") {
+              if (ev.delta) onDelta(ev.delta);
+            } else if (ev.type === "done") {
+              final = ev.response;
+            }
+          }
+          if (!final) throw new Error("streamWithTools ended without a done event");
+          response = final;
         } else {
           response = await this.llm.completeWithTools!(promptFor(current), toolSpecs, options);
         }
@@ -954,20 +953,15 @@ export class AdaptiveRunner {
     // remains the authoritative complete answer.
     //
     // Streaming is taken ONLY when it is both wanted and safe:
-    //   (a) `streamToEmitter` — an event emitter was supplied for this run, so
+    //   (a) `streamToEmitter`: an event emitter was supplied for this run, so
     //       the deltas actually reach someone. Gating on provider capability
     //       alone made EVERY run take the streaming path (agent.run() passes no
     //       emitter), streaming to nobody.
-    //   (b) no `wrapModelCall` middleware is registered. Streamed calls bypass
-    //       the middleware onion, so taking that path with e.g.
-    //       PromptCacheMiddleware installed silently disables caching (large
-    //       system prompts re-billed at full rate every loop step) along with
-    //       ContextSummarization / ToolResultEviction / ArgumentTruncation /
-    //       PatchToolCalls.
-    // The two are mutually exclusive today because the onion's `NextFn` returns
-    // a whole ModelResponse rather than a stream — an agent that registers
-    // wrapModelCall middleware therefore does NOT stream. Making them compose
-    // needs a streaming-aware onion; that is the follow-up.
+    //   (b) every `wrapModelCall` middleware is streamSafe (it changes only
+    //       the request, or reads the response). The onion's terminal then
+    //       streams and still hands the whole response back up, so caching and
+    //       the rest keep working. A middleware that rewrites replies (not
+    //       streamSafe) turns streaming off, so nothing leaves before it has.
     const onDelta =
       streamToEmitter && this.llm.streamWithTools
         ? (delta: string) => emit({ type: "stream_chunk", data: { delta } })
