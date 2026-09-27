@@ -103,7 +103,8 @@ src/
                           AgentForge: the prompt, the result offload and the per-run reads, without the tools twice
       simple-memory.ts  : SimpleMemoryMiddleware: recalls the run's memories into the prompt (inside <minns-memories>,
                           which minns-simple leaves out when it extracts), remember/recall/forget tools in the run's
-                          scope, and in auto mode sends each finished exchange for background extraction
+                          scope, and in auto mode sends each finished exchange for background extraction. Every
+                          fact carries the host's metadataFor (where it was learned: the run or conversation)
       code-mode.ts      — CodeModeMiddleware: programmatic tool calling. `run_code` runs a JavaScript program in a
                           QuickJS sandbox (no host access) where tools.<name>(args) calls a disclosed tool through
                           ToolRegistry.execute (validate/authorize/approval/cap all apply); synchronous from the

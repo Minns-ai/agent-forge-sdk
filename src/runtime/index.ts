@@ -9,6 +9,7 @@
 export { AGENT_ID_RESOURCE_ATTR } from "./contract.js";
 export type {
   InvokeRequest,
+  InvokeAttachment,
   InvokeResponse,
   RunStepStatus,
   ExecuteCandidateRequest,

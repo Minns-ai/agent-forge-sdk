@@ -42,6 +42,22 @@ export interface InvokeRequest {
    *  approval). The agent may also auto-detect resume from an existing
    *  checkpoint; this flag makes intent explicit. */
   resume?: boolean;
+  /** The person the run is for, when a person started it: what the agent
+   *  remembers is kept per person by this. Absent for a schedule, a trigger
+   *  or a public caller. */
+  user_id?: string;
+  /** Files the person attached to this turn. */
+  attachments?: InvokeAttachment[];
+}
+
+/** A file attached to a turn. `url` is a short-lived link to fetch it from;
+ *  it stops working minutes after the invoke. */
+export interface InvokeAttachment {
+  name: string;
+  mime: string;
+  /** Bytes. */
+  size: number;
+  url: string;
 }
 
 /** Control plane → agent. Execute a human-approved HITL candidate.

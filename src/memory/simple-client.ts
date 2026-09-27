@@ -126,6 +126,11 @@ export class MinnsSimpleClient {
     return this.call("POST", "/v1/memories/search", input);
   }
 
+  /** What is true now for the filters, newest first, a page at a time. */
+  list(input: { filters?: SimpleFilter; limit?: number; offset?: number; include_superseded?: boolean } = {}): Promise<{ results: SimpleMemoryItem[]; more: boolean }> {
+    return this.call("POST", "/v1/memories/list", input);
+  }
+
   get(id: string, filters?: SimpleFilter): Promise<SimpleMemoryItem> {
     return this.call("GET", `/v1/memories/${encodeURIComponent(id)}${MinnsSimpleClient.filtersQuery(filters)}`);
   }

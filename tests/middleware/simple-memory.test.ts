@@ -123,6 +123,21 @@ describe("SimpleMemoryMiddleware", () => {
   });
 });
 
+describe("SimpleMemoryMiddleware, where a fact came from", () => {
+  it("stamps every fact it writes with the host's metadata, by the tool and in auto mode", async () => {
+    const { client, calls } = fakeClient();
+    const mw = new SimpleMemoryMiddleware({ client, mode: "auto", recall: false, metadataFor: () => ({ run_id: "conv-7" }) });
+    await withRun("r7", async () => {
+      const s = state({ message: "I moved to Leeds", responseMessage: "Noted." });
+      await mw.beforeExecute(s, ctx);
+      await tool(mw, "remember").execute({ text: "Ana lives in Leeds" }, {} as any);
+      await mw.afterExecute(s, ctx);
+    });
+    expect(calls.find((c) => c.method === "add")?.input.metadata).toEqual({ run_id: "conv-7" });
+    expect(calls.find((c) => c.method === "addMessages")?.input.metadata).toEqual({ run_id: "conv-7" });
+  });
+});
+
 describe("MinnsSimpleClient", () => {
   afterEach(() => vi.unstubAllGlobals());
 

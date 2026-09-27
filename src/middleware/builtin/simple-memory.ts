@@ -40,6 +40,10 @@ export interface SimpleMemoryConfig {
   /** How many facts to recall before each turn, and how relevant they must
    *  be. false turns recall off (the tools still work). */
   recall?: { limit?: number; threshold?: number } | false;
+  /** Metadata every fact this middleware writes carries: where it came from
+   *  (the host's run or conversation id), so what is kept can be traced back
+   *  to the conversation it was learned in. Flat values only. */
+  metadataFor?: (state: Readonly<PipelineState>) => Record<string, string | number | boolean> | undefined;
 }
 
 const NAME = "simple-memory";
@@ -56,8 +60,9 @@ export class SimpleMemoryMiddleware implements Middleware {
   readonly tools: ToolDefinition[];
   private readonly mode: "tool" | "auto";
   private readonly scopeFor: (state: Readonly<PipelineState>) => SimpleMemoryScope | null;
-  /** Each live run's scope, for the tools (which see only their own call). */
-  private readonly runs = new Map<string, SimpleMemoryScope | null>();
+  /** Each live run's scope and the metadata its writes carry, for the tools
+   *  (which see only their own call). */
+  private readonly runs = new Map<string, { scope: SimpleMemoryScope | null; metadata?: Record<string, string | number | boolean> }>();
 
   constructor(private readonly config: SimpleMemoryConfig) {
     this.mode = config.mode ?? "tool";
@@ -67,7 +72,12 @@ export class SimpleMemoryMiddleware implements Middleware {
 
   private scopeOfRun(): SimpleMemoryScope | null {
     const run = currentRunId();
-    return run ? (this.runs.get(run) ?? null) : null;
+    return run ? (this.runs.get(run)?.scope ?? null) : null;
+  }
+
+  private metadataOfRun(): Record<string, string | number | boolean> | undefined {
+    const run = currentRunId();
+    return run ? this.runs.get(run)?.metadata : undefined;
   }
 
   private buildTools(): ToolDefinition[] {
@@ -91,10 +101,12 @@ export class SimpleMemoryMiddleware implements Middleware {
         execute: async (params): Promise<ToolResult> => {
           const scope = this.scopeOfRun();
           if (!scope) return unavailable;
+          const metadata = this.metadataOfRun();
           try {
             const { results } = await this.config.client.add({
               text: String(params.text ?? ""),
               scope: scope.write,
+              ...(metadata ? { metadata } : {}),
               ...(params.key ? { key: String(params.key) } : {}),
               ...(params.when ? { valid_from: String(params.when) } : {}),
               ...(params.expires ? { expires_at: String(params.expires) } : {}),
@@ -154,7 +166,7 @@ export class SimpleMemoryMiddleware implements Middleware {
     if (run) {
       // A run that failed before afterExecute leaves its entry: keep the map bounded.
       if (this.runs.size > 1_000) this.runs.delete(this.runs.keys().next().value as string);
-      this.runs.set(run, scope);
+      this.runs.set(run, { scope, metadata: this.config.metadataFor?.(state) });
     }
     if (!scope || this.config.recall === false || !state.message.trim()) return;
     try {
@@ -179,8 +191,9 @@ export class SimpleMemoryMiddleware implements Middleware {
 
   async afterExecute(state: PipelineState, _context: MiddlewareContext): Promise<StateUpdate | void> {
     const run = currentRunId();
-    const scope = run ? this.runs.get(run) : this.scopeFor(state);
+    const kept = run ? this.runs.get(run) : { scope: this.scopeFor(state), metadata: this.config.metadataFor?.(state) };
     if (run) this.runs.delete(run);
+    const scope = kept?.scope;
     if (this.mode !== "auto" || !scope || !state.message.trim() || !state.responseMessage.trim()) return;
     // In the background: the reply does not wait on memory.
     void this.config.client
@@ -192,6 +205,7 @@ export class SimpleMemoryMiddleware implements Middleware {
         scope: scope.write,
         ...(this.config.keys?.length ? { keys: this.config.keys } : {}),
         observed_at: new Date().toISOString(),
+        ...(kept?.metadata ? { metadata: kept.metadata } : {}),
       })
       .catch((err: unknown) => console.warn(`[simple-memory] could not send the turn for extraction: ${err instanceof Error ? err.message : err}`));
   }
