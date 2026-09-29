@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { LLMMessage, LLMToolSpec } from "../types.js";
 import { contentToText } from "../llm/content.js";
-import { currentRunId } from "../utils/run-context.js";
+import { currentRun } from "../utils/run-context.js";
 
 // The span vocabulary the control plane and opto read. Keys follow the OTel
 // GenAI semantic conventions where one exists (`gen_ai.*`) and `minns.*` for
@@ -12,6 +12,8 @@ import { currentRunId } from "../utils/run-context.js";
 export const TRACE_ATTRS = {
   /** Groups every span of one run into one trajectory. */
   ROLLOUT_ID: "minns.rollout_id",
+  /** The conversation a run is one turn of, when each turn is its own run. */
+  CONVERSATION_ID: "minns.conversation_id",
   /** The prompt version the run executed under (the hash the prompt route serves). */
   PROMPT_VERSION: "minns.prompt.version",
   /** Session the run belongs to. */
@@ -124,11 +126,13 @@ export const toolsHash = (tools: LLMToolSpec[]): string => {
   return createHash("sha256").update(JSON.stringify(canon)).digest("hex").slice(0, 16);
 };
 
-/** Attributes every span carries: the run it belongs to and the prompt version. */
+/** Attributes every span carries: the run it belongs to (and its conversation,
+ *  when the run is one turn of one) and the prompt version. */
 export const baseAttrs = (capture: ContentCapture): Record<string, AttrValue> => {
   const attrs: Record<string, AttrValue> = {};
-  const rollout = currentRunId();
-  if (rollout) attrs[TRACE_ATTRS.ROLLOUT_ID] = rollout;
+  const run = currentRun();
+  if (run?.runId) attrs[TRACE_ATTRS.ROLLOUT_ID] = run.runId;
+  if (run?.conversationId) attrs[TRACE_ATTRS.CONVERSATION_ID] = run.conversationId;
   const version = capture.promptVersion?.();
   if (version) attrs[TRACE_ATTRS.PROMPT_VERSION] = version;
   return attrs;

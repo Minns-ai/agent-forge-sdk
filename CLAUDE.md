@@ -170,7 +170,9 @@ split into two decoupled tiers:
   (middleware/builtin/telemetry.ts) put the content on the spans: run input and
   output, per-call messages and offered tools, per-tool arguments/result/failure
   class, prompt version, all keyed on the run id from `utils/run-context.ts`
-  (`minns.rollout_id`, which opto groups a trajectory by). Middleware
+  (`minns.rollout_id`, which opto groups a trajectory by). A harness that runs
+  each turn of a conversation as its own run passes `withRun(id, fn,
+  { conversationId })`, and every span then also carries `minns.conversation_id`. Middleware
   `wrapToolCall` is the hook every `ToolRegistry.execute` flows through.
 - **Durable / "runs on us"** — `serveAgent({ handler })` exposes `POST /v1/invoke`
   (the contract in `contract.ts`). `createGraphStepHandler({ graph, ... })` adapts
