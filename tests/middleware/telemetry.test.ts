@@ -184,6 +184,7 @@ describe("TelemetryMiddleware + tracedProvider", () => {
     await withRun("run-from-control-plane", () => agent.run("hi", { sessionId: 2 }));
     expect(spans.length).toBeGreaterThan(0);
     for (const s of spans) expect(s.attrs[TRACE_ATTRS.ROLLOUT_ID]).toBe("run-from-control-plane");
+    for (const s of spans) expect(s.attrs[TRACE_ATTRS.CONVERSATION_ID]).toBeUndefined();
 
     const silent = new AgentForge({
       directive: { identity: "T", goalDescription: "g", maxIterations: 3 },
@@ -195,6 +196,24 @@ describe("TelemetryMiddleware + tracedProvider", () => {
     const r = await silent.run("hi", { sessionId: 3 });
     expect(r.message).toBeTruthy();
     expect(spans.length).toBe(before);
+  });
+
+  it("keys one turn of a conversation as its own run, naming the conversation", async () => {
+    const { spans, sink } = fakeSink();
+    const agent = new AgentForge({
+      directive: { identity: "T", goalDescription: "g", maxIterations: 3 },
+      llm: tracedProvider(makeProvider(), sink),
+      tools: [lookupTool],
+      middleware: [new TelemetryMiddleware({ telemetry: sink })],
+    });
+    // Two turns of one conversation: two trajectories, one conversation.
+    await withRun("chat-1:turn-a", () => agent.run("hi", { sessionId: 4 }), { conversationId: "chat-1" });
+    const first = spans.length;
+    await withRun("chat-1:turn-b", () => agent.run("again", { sessionId: 4 }), { conversationId: "chat-1" });
+    expect(first).toBeGreaterThan(0);
+    expect(new Set(spans.slice(0, first).map((s) => s.attrs[TRACE_ATTRS.ROLLOUT_ID]))).toEqual(new Set(["chat-1:turn-a"]));
+    expect(new Set(spans.slice(first).map((s) => s.attrs[TRACE_ATTRS.ROLLOUT_ID]))).toEqual(new Set(["chat-1:turn-b"]));
+    for (const s of spans) expect(s.attrs[TRACE_ATTRS.CONVERSATION_ID]).toBe("chat-1");
   });
 
   it("caps content and can be told to send the skeleton only", async () => {

@@ -159,11 +159,18 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
           sendJson(res, 400, { error: "run_id is required" });
           return;
         }
+        // Everything the contract carries goes on to the handler: who is
+        // calling and for whom decide what the agent may do and remember, and
+        // the files are what the person sent.
         const request: InvokeRequest = {
           run_id: b.run_id,
           input: typeof b.input === "string" ? b.input : "",
           step: typeof b.step === "number" ? b.step : 0,
           resume: b.resume === true,
+          ...(b.caller === "public" ? { caller: "public" as const } : {}),
+          ...(b.collab === true ? { collab: true } : {}),
+          ...(typeof b.user_id === "string" && b.user_id ? { user_id: b.user_id } : {}),
+          ...(Array.isArray(b.attachments) ? { attachments: b.attachments.slice(0, 10) } : {}),
         };
 
         // The caller hanging up (the person pressed Stop, or the control plane

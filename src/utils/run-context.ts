@@ -11,6 +11,9 @@ import type { ToolCallWrapper } from "../tools/tool-registry.js";
 
 export interface RunContext {
   runId: string;
+  /** The conversation this run is one turn of, when a harness keys each turn
+   *  as its own run (spans carry it as `minns.conversation_id`). */
+  conversationId?: string;
   /** Per-run tool-call onion installed by the pipeline (see MiddlewareStack). */
   toolCall?: ToolCallWrapper;
   /** Tool-definition hashes already emitted in full on this run's spans. */
@@ -40,8 +43,10 @@ export const currentRun = (): RunContext | undefined => storage.getStore();
 /** Shorthand for {@link currentRun}'s id. */
 export const currentRunId = (): string | undefined => storage.getStore()?.runId;
 
-/** Execute `fn` inside a run with the given id (replaces any enclosing run). */
-export const withRun = <T>(runId: string, fn: () => T): T => storage.run({ runId }, fn);
+/** Execute `fn` inside a run with the given id (replaces any enclosing run).
+ *  `conversationId` names the conversation when the run is one turn of it. */
+export const withRun = <T>(runId: string, fn: () => T, opts: { conversationId?: string } = {}): T =>
+  storage.run(opts.conversationId ? { runId, conversationId: opts.conversationId } : { runId }, fn);
 
 /**
  * Execute `fn` inside a run: the enclosing one when present (a harness
