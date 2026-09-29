@@ -48,6 +48,12 @@ export interface InvokeRequest {
   user_id?: string;
   /** Files the person attached to this turn. */
   attachments?: InvokeAttachment[];
+  /** "public" when someone outside the account is calling (the public
+   *  gateway, a phone call, a collab room): the agent acts for them with its
+   *  public policy, never as its owner. Absent for the owner's own calls. */
+  caller?: "public";
+  /** A collab room's turn (with caller "public"): only what the room shares. */
+  collab?: boolean;
 }
 
 /** A file attached to a turn. `url` is a short-lived link to fetch it from;
