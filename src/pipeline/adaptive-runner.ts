@@ -53,7 +53,7 @@ import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
 import { defaultGoalChecker } from "./phases/goal-check-phase.js";
 import { compactMessages } from "./context-compaction.js";
 import { isContextLengthError, recoverContext, MAX_CONTEXT_RECOVERY } from "./context-recovery.js";
-import { noted } from "../utils/failure.js";
+import { noted, noteFailure } from "../utils/failure.js";
 import { judgeTurn, truncationFeedback, MAX_TRUNCATED_TURNS } from "../llm/turn-safety.js";
 
 // ─── Heuristic Router ─────────────────────────────────────────────────────────
@@ -747,6 +747,8 @@ export class AdaptiveRunner {
     this.updateConversationHistory(sessionState, message, responseMessage);
 
     // ── Minns ingestion (non-blocking) ───────────────────────────────────
+    // Once per turn on both tiers: the person's message as "user", the reply
+    // as "assistant", so MinnsDB never takes the agent's words as their facts.
     if (this.client) {
       this.ingestToMinns(sessionId, userId, message, responseMessage).catch(noted("adaptive-runner", "ingest the exchange to minns"));
     }
@@ -1304,7 +1306,7 @@ export class AdaptiveRunner {
     const toolContext: ToolContext = pipelineState.toolContext;
     let memorySnapshot: MemorySnapshot = { claims: [] };
 
-    // ── Step 1: Memory Retrieval (parallel with semantic write) ──────────
+    // ── Step 1: Memory Retrieval ─────────────────────────────────────────
     if (this.client) {
       timer.startPhase("memory_retrieval");
       try {
@@ -1336,9 +1338,7 @@ export class AdaptiveRunner {
         errors.push(err?.message || "Memory retrieval failed");
       }
       timer.endPhase(`${memorySnapshot.claims.length} claims`);
-
-      // Semantic write (non-blocking)
-      this.ingestToMinns(sessionId, userId, message).catch(noted("adaptive-runner", "ingest the message to minns"));
+      // The message itself is sent once, with the reply, when the run ends.
     }
 
     // ── Step 2: Complexity Assessment (heuristic first, LLM fallback) ────
@@ -1494,21 +1494,27 @@ export class AdaptiveRunner {
   private async ingestToMinns(
     sessionId: number,
     userId: string | undefined,
-    ...messages: string[]
+    message: string,
+    reply: string,
   ): Promise<void> {
     if (!this.client?.sendMessage) return;
 
-    for (const content of messages) {
+    const turn: Array<{ role: "user" | "assistant"; content: string }> = [
+      { role: "user", content: message },
+      { role: "assistant", content: reply },
+    ];
+    for (const { role, content } of turn) {
       if (!content) continue;
+      // Non-blocking ingestion: a failed send never fails the pipeline.
       try {
         await this.client.sendMessage({
-          role: "user",
+          role,
           content,
           case_id: userId ?? `agent-${this.agentId}`,
           session_id: String(sessionId),
         });
-      } catch {
-        // Non-blocking ingestion - don't fail the pipeline
+      } catch (err) {
+        noteFailure("adaptive-runner", `ingest the ${role} message to minns`, err);
       }
     }
   }
