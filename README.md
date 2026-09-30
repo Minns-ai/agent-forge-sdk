@@ -146,17 +146,19 @@ await planner.run("Refactor the authentication module to use JWT tokens instead 
 ### Parallel research with graph execution (no minns)
 
 ```typescript
-import { AgentGraph, InMemoryCheckpointer, END, appendReducer } from "@minns/agent-forge";
+import { AgentGraph, InMemoryCheckpointer, END, appendReducer, OpenAIProvider } from "@minns/agent-forge";
+
+const llm = new OpenAIProvider({ apiKey: process.env.OPENAI_KEY!, model: "gpt-4o" });
 
 interface ResearchState {
   topic: string;
-  sources: string[];   // ← appendReducer: parallel nodes all push here
+  sources: string[];   // ← appendReducer(): parallel nodes all push here
   synthesis: string;
 }
 
-const research = new AgentGraph<ResearchState>({
-  reducers: { sources: appendReducer },
-})
+const research = new AgentGraph<ResearchState>()
+  .setReducers({ sources: appendReducer() })
+  .addNode("start", async () => ({}))
   .addNode("scholar", async (state) => {
     const papers = await searchGoogleScholar(state.topic);
     return { sources: papers.map((p) => `[Scholar] ${p.title}: ${p.summary}`) };
@@ -170,13 +172,13 @@ const research = new AgentGraph<ResearchState>({
     return { sources: posts.map((p) => `[Reddit] ${p.title}: ${p.body}`) };
   })
   .addNode("synthesize", async (state) => {
-    const response = await llm.complete(
-      `Synthesize these sources about "${state.topic}":\n\n${state.sources.join("\n\n")}`,
-    );
+    const response = await llm.complete([
+      { role: "user", content: `Synthesize these sources about "${state.topic}":\n\n${state.sources.join("\n\n")}` },
+    ]);
     return { synthesis: response };
   })
-  .setEntryPoint("scholar")
-  .addParallelEdge("scholar", ["scholar", "news", "reddit"], "synthesize")
+  .setEntryPoint("start")
+  .addParallelEdge("start", ["scholar", "news", "reddit"], "synthesize")
   .addEdge("synthesize", END)
   .compile({ checkpointer: new InMemoryCheckpointer() });
 
@@ -323,7 +325,7 @@ const frontend = new AgentForge({
 // Either agent can:
 // - discover_agents → find peers in the group
 // - create_shared_workflow → "Build OAuth2 login flow" with steps for each agent
-// - send_agent_message → "API endpoint is ready at POST /api/auth/token"
+// - send_to_agent → "API endpoint is ready at POST /api/auth/token"
 // - watch_for_work → subscribe to pending tasks assigned to them
 // - poll_updates → check for new messages and completed steps
 // - query_graph → 'MATCH (s:Concept {status: "completed"})-[e]->(w) RETURN s.step_name, w.name'
@@ -542,7 +544,10 @@ const agent = new AgentForge({
   middleware: [
     new ContextSummarizationMiddleware({ tokenBudget: 100_000 }), // compress long conversations
     new TodoListMiddleware(),                                      // structured task planning
-    new HumanInTheLoopMiddleware({ require: ["deploy_*"] }),       // approval gates
+    new HumanInTheLoopMiddleware({                                 // approval gates
+      interruptOn: { deploy_service: true },                       // exact tool names
+      approvalHandler: async (tool, params, description) => ({ action: "approve" }),
+    }),
     new PromptCacheMiddleware(),                                   // Anthropic cache control
     new MinnsFullPowerMiddleware({ client, enableTools: ["tables", "query"] }),
   ],
@@ -789,7 +794,9 @@ const pipeline = new AgentGraph<ResearchState>()
     return { sources: results };
   })
   .addNode("analyze", async (state) => {
-    const analysis = await llm.complete(`Analyze these sources: ${JSON.stringify(state.sources)}`);
+    const analysis = await llm.complete([
+      { role: "user", content: `Analyze these sources: ${JSON.stringify(state.sources)}` },
+    ]);
     return { analysis };
   })
   .addNode("review", async (state) => {
@@ -963,6 +970,7 @@ await prompts.start();
 const agent = new AgentForge({
   directive: { identity: "support", goalDescription: prompts.current!.prompt },
   llm: tracedProvider(new AnthropicProvider({ ... }), telemetry, { promptVersion: () => prompts.current?.version }),
+  agentId: 1,
   tools,
   middleware: [new TelemetryMiddleware({ telemetry, promptVersion: () => prompts.current?.version })],
 });
@@ -978,14 +986,9 @@ failure classes) if message text must not leave the process.
 ## Browser
 
 A browser an agent can use by saying what it wants, with routines it can
-replay reliably, is its own package: [`@minns/browser`](https://github.com/Minns-ai/Minns-ai-minns-browser).
-Its pilot takes any model with `complete(messages)`, so an agent-forge
-provider plugs straight in:
-
-```ts
-import { BrowserPilot, PageDriver } from "@minns/browser";
-const pilot = new BrowserPilot({ driver: new PageDriver(page), model: new AnthropicProvider({ ... }) });
-```
+replay reliably, is a separate package, `@minns/browser`. It is not published
+to npm yet. Its pilot takes any model with `complete(messages)`, so an
+agent-forge provider will plug straight in.
 
 ---
 
@@ -993,8 +996,9 @@ const pilot = new BrowserPilot({ driver: new PageDriver(page), model: new Anthro
 
 - Node.js 18+
 - An LLM API key (OpenAI, Anthropic, or any OpenAI-compatible provider)
-- Optional: `minns-sdk` for graph-native memory, temporal tables, MinnsQL, reactive subscriptions
-- Optional: `@anthropic-ai/sdk` for the Anthropic provider
+- `minns-sdk` is a dependency and installs with this package; you only need a minns API key if you use `MinnsMemory`, `MinnsFullPowerMiddleware` or the other minns features
+- Optional peer: `@anthropic-ai/sdk` for the Anthropic provider (`npm i @anthropic-ai/sdk`)
+- Optional peer: `quickjs-emscripten` for `CodeModeMiddleware`
 
 ## License
 
