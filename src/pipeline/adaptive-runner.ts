@@ -110,6 +110,12 @@ function routeExecution(
  * Build a single comprehensive system prompt that teaches the model to handle
  * intent classification, planning, memory retrieval, and response generation
  * in its own reasoning. Replaces 3 separate LLM calls with prompting.
+ *
+ * Two parts. `system` is the same on every run of the agent, so providers
+ * that cache a prompt prefix can reuse it across runs. `runContext` is what
+ * this run knows (facts, recalled memory, constraints, progress): it goes
+ * with this turn's message instead, after the cached prefix, since inside the
+ * system prompt it made every run's prompt new.
  */
 function buildAdaptiveSystemPrompt(params: {
   directive: Required<Directive>;
@@ -120,22 +126,23 @@ function buildAdaptiveSystemPrompt(params: {
   reflexionContext?: ReflexionContext;
   /** Tools withheld from context until the model asks for them. */
   deferredCount?: number;
-}): string {
+}): { system: string; runContext: string } {
   const { directive, sessionState, claims, goalProgress, tools, reflexionContext, deferredCount } = params;
 
+  const stable: string[] = [];
   const parts: string[] = [];
 
   // Identity and goal
-  parts.push(directive.identity);
-  parts.push(`\nYour goal: ${directive.goalDescription}`);
+  stable.push(directive.identity);
+  stable.push(`\nYour goal: ${directive.goalDescription}`);
   if (deferredCount) {
-    parts.push(`\n${deferredCount} more tool${deferredCount === 1 ? " is" : "s are"} available but not attached: call find_tools with keywords to load what you need.`);
+    stable.push(`\n${deferredCount} more tool${deferredCount === 1 ? " is" : "s are"} available but not attached: call find_tools with keywords to load what you need.`);
   }
 
   // Behavior rules — promoted from the battle-tested native-tool prompt
   // (previously dead code on this default path): explicit work loop with a
   // verify step, error-recovery guidance, and anti-preamble rules.
-  parts.push(`
+  stable.push(`
 ## How to work
 
 - Be direct. No preamble, no over-explaining, no re-asking for what was already given.
@@ -200,7 +207,7 @@ function buildAdaptiveSystemPrompt(params: {
     }
   }
 
-  return parts.join("\n");
+  return { system: stable.join("\n"), runContext: parts.join("\n").trim() };
 }
 
 // ─── Tool Spec Builder ────────────────────────────────────────────────────────
@@ -257,8 +264,17 @@ function disclosedNames(registry: ToolRegistry): Set<string> {
  */
 function buildToolSpecs(registry: ToolRegistry, disclosed?: Set<string>): LLMToolSpec[] {
   const all = registry.definitions();
-  const offered = disclosed ? all.filter((t) => disclosed.has(t.name)) : all;
-  const specs: LLMToolSpec[] = offered.map((tool: ToolDefinition) => ({
+  // What the run started with, in registry order, then what find_tools
+  // surfaced, in the order it did. Surfaced tools used to be slotted in among
+  // the others, which changed the request from that point on and so missed
+  // the prompt cache for every tool after it, the system prompt and the whole
+  // conversation.
+  const initial = disclosedNames(registry);
+  const own = disclosed ? all.filter((t) => initial.has(t.name) && disclosed.has(t.name)) : all;
+  const surfaced = disclosed
+    ? [...disclosed].filter((n) => !initial.has(n)).map((n) => all.find((t) => t.name === n)).filter((t): t is ToolDefinition => !!t)
+    : [];
+  const spec = (tool: ToolDefinition): LLMToolSpec => ({
     name: tool.name,
     description: tool.description,
     parameters: {
@@ -270,9 +286,12 @@ function buildToolSpecs(registry: ToolRegistry, disclosed?: Set<string>): LLMToo
         .filter(([, schema]) => !schema.optional)
         .map(([name]) => name),
     },
-  }));
-  if (disclosed && offered.length < all.length) specs.push(FIND_TOOLS_SPEC);
-  return specs;
+  });
+  const specs = own.map(spec);
+  // find_tools stays while anything is withheld, and once it has surfaced
+  // something, so the list the run started with is never cut short.
+  if (disclosed && (own.length + surfaced.length < all.length || surfaced.length > 0)) specs.push(FIND_TOOLS_SPEC);
+  return [...specs, ...surfaced.map(spec)];
 }
 
 // ─── AdaptiveRunner ───────────────────────────────────────────────────────────
@@ -891,7 +910,7 @@ export class AdaptiveRunner {
     // constraints/lessons the ReflexionEngine extracted actually reach the model —
     // previously they were built and stored on pipelineState but never surfaced to
     // the agentic loop's prompt, so reflexion was inert on this (default) path.
-    const systemPrompt = buildAdaptiveSystemPrompt({
+    const { system: systemPrompt, runContext } = buildAdaptiveSystemPrompt({
       directive: this.directive,
       sessionState,
       claims: pipelineState.memory.claims,
@@ -913,11 +932,13 @@ export class AdaptiveRunner {
 
     // Add current message. With attachments the user turn is multimodal:
     // a text block for the message plus the caller-supplied content blocks.
+    // What this run knows comes first, in the same turn (not the history).
     const attachments = pipelineState.attachments;
+    const turnText = runContext ? `${runContext}\n\n${message}` : message;
     messages.push(
       attachments?.length
-        ? { role: "user", content: [{ type: "text", text: message }, ...attachments] }
-        : { role: "user", content: message },
+        ? { role: "user", content: [{ type: "text", text: turnText }, ...attachments] }
+        : { role: "user", content: turnText },
     );
 
     // Middleware prompt sections are applied per model call, by the stack's
@@ -1347,8 +1368,10 @@ export class AdaptiveRunner {
     }
 
     // ── Step 2: Complexity Assessment (heuristic first, LLM fallback) ────
+    // Its one consumer is the choice of tree search below, so without tree
+    // search it is a model call whose answer nothing reads.
     let complexity: ComplexityAssessment | null = null;
-    if (this.reasoning.adaptiveCompute) {
+    if (this.reasoning.adaptiveCompute && this.treeSearch) {
       timer.startPhase("complexity");
       try {
         complexity = await this.metaReasoner.assess({

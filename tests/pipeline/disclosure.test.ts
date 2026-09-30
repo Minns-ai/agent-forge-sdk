@@ -79,9 +79,9 @@ describe("progressive disclosure in the default runner", () => {
     const agent = new AgentForge({ directive: { identity: "T", goalDescription: "g" }, llm, agentId: 1, tools: [ping, pdf, chart] });
     const result = await agent.run("make the invoice", { sessionId: 1 });
     expect(offered[0]).toEqual(["ping", "find_tools"]);
-    // The pdf tool is attached now; the chart tool is still withheld, so
-    // find_tools stays on offer.
-    expect(offered[1]).toEqual(["ping", "render_pdf", "find_tools"]);
+    // The pdf tool is attached now, after the list the run started with, so
+    // that list (and the prompt cache over it) is unchanged.
+    expect(offered[1]).toEqual(["ping", "find_tools", "render_pdf"]);
     expect(executed).toEqual(["render_pdf"]);
     expect(result.message).toBe("rendered");
     expect(result.reasoning.join("\n")).toContain('find_tools("pdf invoice"): 1 loaded');
@@ -105,14 +105,14 @@ describe("progressive disclosure in the default runner", () => {
     expect(told).toContain("find_tools");
   });
 
-  it("drops find_tools once everything is loaded, and offers nothing extra when nothing is deferred", async () => {
+  it("keeps the list it started with once everything is loaded, and offers nothing extra when nothing is deferred", async () => {
     const { llm, offered } = scripted([
       () => ({ content: null, toolCalls: [call("1", "find_tools", { query: "pdf" })], stopReason: "tool_use" }),
       () => end(),
     ]);
     const agent = new AgentForge({ directive: { identity: "T", goalDescription: "g" }, llm, agentId: 1, tools: [ping, pdf] });
     await agent.run("hi", { sessionId: 1 });
-    expect(offered[1]).toEqual(["ping", "render_pdf"]);
+    expect(offered[1]).toEqual(["ping", "find_tools", "render_pdf"]);
 
     const plain = scripted([() => end()]);
     await new AgentForge({ directive: { identity: "T", goalDescription: "g" }, llm: plain.llm, agentId: 1, tools: [ping] }).run("hi", { sessionId: 1 });
