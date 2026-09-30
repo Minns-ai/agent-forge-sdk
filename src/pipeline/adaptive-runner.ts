@@ -335,6 +335,8 @@ export class AdaptiveRunner {
   constructor(params: {
     directive: Directive;
     llm: LLMProvider;
+    /** Runs self-critique; the agent's own model when omitted. */
+    lightLlm?: LLMProvider;
     client: any;
     memoryProvider?: import("../memory/provider.js").MemoryIntegration | null;
     agentId: number;
@@ -365,6 +367,7 @@ export class AdaptiveRunner {
       pruneThreshold: 0.3,
       reflexion: true,
       selfCritique: false,
+      critiqueUnattended: false,
       worldModel: false,
       ...params.reasoning,
     };
@@ -401,7 +404,7 @@ export class AdaptiveRunner {
         })
       : null;
     this.selfCritique = this.reasoning.selfCritique
-      ? new SelfCritique(params.llm)
+      ? new SelfCritique(params.lightLlm ?? params.llm)
       : null;
 
     // Sub-agents (orchestrator-worker). Register the workers and expose a real
@@ -693,7 +696,9 @@ export class AdaptiveRunner {
     pipelineState.responseMessage = responseMessage;
 
     // ── Self-Critique (optional, both tiers) ─────────────────────────────
-    if (this.selfCritique && responseMessage) {
+    // Not on an unattended run unless asked for: nobody reads the reply first.
+    const critiqueThisRun = controls?.unattended ? this.reasoning.critiqueUnattended : true;
+    if (this.selfCritique && critiqueThisRun && responseMessage) {
       timer.startPhase("self_critique");
       try {
         const critique = await this.selfCritique.critique({

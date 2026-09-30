@@ -56,11 +56,11 @@ const BUILTIN_TOOLS: ToolDefinition[] = [searchMemoriesTool, storeFactTool, repo
  */
 /** Extract the per-run governance rails from RunOptions (undefined if none set). */
 function controlsFrom(options: RunOptions): RunControls | undefined {
-  const { signal, maxToolCalls, maxBudgetUsd } = options;
-  if (signal === undefined && maxToolCalls === undefined && maxBudgetUsd === undefined) {
+  const { signal, maxToolCalls, maxBudgetUsd, unattended } = options;
+  if (signal === undefined && maxToolCalls === undefined && maxBudgetUsd === undefined && !unattended) {
     return undefined;
   }
-  return { signal, maxToolCalls, maxBudgetUsd };
+  return { signal, maxToolCalls, maxBudgetUsd, ...(unattended ? { unattended } : {}) };
 }
 
 export class AgentForge {
@@ -108,6 +108,7 @@ export class AgentForge {
     return new AdaptiveRunner({
       directive: this.config.directive,
       llm: this.config.llm,
+      lightLlm: this.config.lightLlm,
       client: legacyClient,
       memoryProvider,
       agentId: this.config.agentId,
