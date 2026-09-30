@@ -198,7 +198,7 @@ const results = await client.searchCode({
 ```typescript
 import { createClient } from 'minns-sdk';
 
-// Simple — API key only (connects to https://api.minns.ai)
+// Simple: API key only. Uses the built-in default URL, which needs the fix in the note below
 const client = createClient("your-api-key");
 
 // With default IDs for event builders
@@ -209,6 +209,7 @@ import { MinnsClient } from 'minns-sdk';
 
 const client = new MinnsClient({
   apiKey: "your-api-key",
+  baseUrl: "https://minns.ai",
   agentId: 1,
   sessionId: 42,
   debug: true,
@@ -235,7 +236,7 @@ const client = new MinnsClient({
 | `batchMaxSize` | `number` | `10` | Max events before forcing a flush. |
 | `maxQueueSize` | `number` | `1000` | Max local queue depth before `enqueue()` throws. |
 
-> **Note:** The base URL defaults to `https://api.minns.ai`. Override with `baseUrl` in `MinnsClientConfig`.
+> **Note:** Set `baseUrl: "https://minns.ai"` when you use the hosted API. The built-in default, `https://api.minns.ai`, does not route correctly with this SDK: the SDK adds `/api` to every path and that host adds another, so requests end up at `/api/api/...`. `createClient()` cannot take a base URL, so construct `MinnsClient` directly. For a self-hosted server, pass its address, for example `http://localhost:3000`.
 
 ---
 
