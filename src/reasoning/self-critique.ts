@@ -1,14 +1,29 @@
 import type { LLMProvider, LLMMessage, SessionState, GoalProgress, Directive } from "../types.js";
 import type { CritiqueResult } from "./types.js";
 import { safeJsonParse } from "../utils/json.js";
+import { noteFailure } from "../utils/failure.js";
 
 /** Escape regex metacharacters so user-supplied strings can be embedded in patterns. */
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Replies this long or longer always go to the critic. */
+const CRITIQUE_FROM_CHARS = 1000;
+/** Room for the verdict, the issues and the JSON around the rewrite. */
+const VERDICT_TOKENS = 300;
+/** A rewrite may run to the reply's own length: about one token per 3 chars,
+ *  which leaves room for the escaping JSON adds, up to this ceiling. */
+const MAX_REWRITE_TOKENS = 16_000;
+
+/** The output budget for a critique of `response`: the verdict plus a rewrite
+ *  as long as the reply itself, so a rewrite is never cut off mid-answer. */
+export function critiqueMaxTokens(response: string): number {
+  return VERDICT_TOKENS + Math.min(MAX_REWRITE_TOKENS, Math.ceil(response.length / 3));
+}
+
 /**
- * Self-Critique — evaluates the generated response before sending it.
+ * Self-Critique: evaluates the generated response before sending it.
  *
  * Checks:
  * 1. Does the response answer what the user asked?
@@ -16,7 +31,10 @@ function escapeRegExp(value: string): string {
  * 3. Does it move toward the goal?
  * 4. Is it concise and actionable?
  *
- * If it fails, rewrites the response.
+ * If it fails, rewrites the response. A rewrite of a long reply that comes
+ * back less than half its length is not taken: that is a summary, not a fix.
+ *
+ * `llm` should be the agent's light model: this is a check, not the answer.
  */
 export class SelfCritique {
   private llm: LLMProvider;
@@ -42,7 +60,7 @@ export class SelfCritique {
 
     // Fast heuristic checks (no LLM call)
     const heuristicIssues = this.heuristicCheck(response, facts, claims);
-    if (heuristicIssues.length === 0 && response.length > 10 && response.length < 1000) {
+    if (heuristicIssues.length === 0 && response.length > 10 && response.length < CRITIQUE_FROM_CHARS) {
       return { approved: true, issues: [], confidence: 0.9 };
     }
 
@@ -62,7 +80,7 @@ Check for:
 1. Does it answer the user's actual question?
 2. Does it re-ask for information already known? (CRITICAL: known facts should never be asked for)
 3. Is it moving toward the goal?
-4. Is it concise (1-3 sentences for simple turns)?
+4. Is it concise (1-3 sentences for simple turns; a report, draft or plan the user asked for keeps its full length)?
 5. Does it acknowledge what the user just said?`,
       },
       {
@@ -78,18 +96,24 @@ ${heuristicIssues.length > 0 ? `\nHeuristic issues found: ${heuristicIssues.join
     ];
 
     try {
-      const raw = await this.llm.complete(messages, { maxTokens: 300, temperature: 0.1 });
+      const raw = await this.llm.complete(messages, { maxTokens: critiqueMaxTokens(response), temperature: 0.1 });
+      // A verdict cut off mid-rewrite does not parse, and the original stands.
       const parsed = safeJsonParse<any>(raw);
       if (parsed) {
+        let rewrite: string | undefined =
+          parsed.approved || typeof parsed.rewrite !== "string" || !parsed.rewrite.trim() ? undefined : parsed.rewrite;
+        if (rewrite && response.length >= CRITIQUE_FROM_CHARS && rewrite.length < response.length / 2) {
+          rewrite = undefined;
+        }
         return {
           approved: parsed.approved ?? true,
           issues: parsed.issues ?? [],
-          rewrittenResponse: parsed.approved ? undefined : (parsed.rewrite ?? undefined),
+          rewrittenResponse: rewrite,
           confidence: parsed.confidence ?? 0.7,
         };
       }
-    } catch {
-      // Critique failed — approve the original response
+    } catch (err) {
+      noteFailure("self-critique", "critique the reply", err);
     }
 
     return {
@@ -132,11 +156,6 @@ ${heuristicIssues.length > 0 ? `\nHeuristic issues found: ${heuristicIssues.join
     // Check for empty or unhelpfully short responses
     if (response.trim().length < 5) {
       issues.push("Response is too short");
-    }
-
-    // Check for overly long responses (agent should be concise)
-    if (response.length > 1500) {
-      issues.push("Response is too long — should be 1-3 sentences");
     }
 
     return issues;

@@ -528,6 +528,9 @@ export interface ReasoningConfig {
   reflexion?: boolean;
   /** Enable self-critique gate before response (default false) */
   selfCritique?: boolean;
+  /** Also critique unattended runs (RunControls.unattended), where nobody reads
+   *  the reply before it is used (default false). */
+  critiqueUnattended?: boolean;
   /**
    * @deprecated This flag is not wired to anything — setting it has no effect.
    * World-model simulation currently runs only inside tree search (enable
@@ -541,6 +544,9 @@ export interface ReasoningConfig {
 export interface AgentForgeConfig {
   directive: Directive;
   llm: LLMProvider;
+  /** A cheaper model for the agent's side checks (self-critique). Omitted:
+   *  they run on `llm`. */
+  lightLlm?: LLMProvider;
   /**
    * Memory provider — any object implementing sendMessage(), searchClaims(), query().
    *
@@ -604,6 +610,9 @@ export interface RunControls {
   /** Hard cap on accumulated LLM cost in USD, enforced when the provider
    *  reports usage (stopReason: "max_budget"). */
   maxBudgetUsd?: number;
+  /** Nobody is waiting on this run (a schedule, an inbox or other trigger).
+   *  Self-critique is skipped unless `reasoning.critiqueUnattended` is set. */
+  unattended?: boolean;
 }
 
 export interface RunOptions extends RunControls {

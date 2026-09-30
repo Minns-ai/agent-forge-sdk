@@ -55,6 +55,7 @@ const DEFAULT_REASONING: Required<ReasoningConfig> = {
   pruneThreshold: 0.3,
   reflexion: true,
   selfCritique: false,
+  critiqueUnattended: false,
   worldModel: false,
 };
 
