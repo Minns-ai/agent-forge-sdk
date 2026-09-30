@@ -123,6 +123,9 @@ const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
   res.end(payload);
 };
 
+/** How many keyed turns (running or finished) are remembered; the oldest go first. */
+const MAX_KEYED_TURNS = 200;
+
 /**
  * Start the agent HTTP server implementing the control-plane contract. Wires
  * telemetry + log shipping from the env rails and records one telemetry span per
@@ -134,6 +137,9 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
   const telemetry = opts.telemetry !== undefined ? opts.telemetry : telemetryFromRails(rails);
   const logs = opts.logs !== undefined ? opts.logs : logShipperFromRails(rails);
   const port = opts.port ?? (Number(env.PORT) || 8080);
+  // Keyed turns by run and key: a retry of one (a worker that timed out or
+  // died) gets the same run, in flight or finished, and pays for it once.
+  const keyedTurns = new Map<string, Promise<InvokeResponse>>();
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -171,7 +177,10 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
           ...(b.collab === true ? { collab: true } : {}),
           ...(typeof b.user_id === "string" && b.user_id ? { user_id: b.user_id } : {}),
           ...(Array.isArray(b.attachments) ? { attachments: b.attachments.slice(0, 10) } : {}),
+          ...(b.unattended === true ? { unattended: true } : {}),
+          ...(typeof b.idempotency_key === "string" && b.idempotency_key ? { idempotency_key: b.idempotency_key.slice(0, 200) } : {}),
         };
+        const turnKey = request.idempotency_key ? `${request.run_id}\n${request.idempotency_key}` : "";
 
         // The caller hanging up (the person pressed Stop, or the control plane
         // gave up) stops the run: it should not go on spending and acting for
@@ -192,13 +201,29 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
           if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(o)}\n`);
         };
         const ctx: StepContext = {
-          signal: hangUp.signal,
+          // A keyed turn outlives its caller: the retry that follows a hang-up
+          // picks it up instead of paying for it again.
+          ...(turnKey ? {} : { signal: hangUp.signal }),
           ...(streaming ? { onDelta: (text: string) => text && line({ type: "delta", text }) } : {}),
         };
 
         let result: InvokeResponse;
         try {
-          result = await withRun(request.run_id, () => opts.handler(request, ctx));
+          let turn = turnKey ? keyedTurns.get(turnKey) : undefined;
+          if (!turn) {
+            turn = withRun(request.run_id, () => opts.handler(request, ctx));
+            if (turnKey) {
+              keyedTurns.set(turnKey, turn);
+              if (keyedTurns.size > MAX_KEYED_TURNS) keyedTurns.delete(keyedTurns.keys().next().value as string);
+              // A failed turn is forgotten, so a retry runs it again. The
+              // failure itself reaches the caller through the await below.
+              const started = turn;
+              started.then(undefined, () => {
+                if (keyedTurns.get(turnKey) === started) keyedTurns.delete(turnKey);
+              });
+            }
+          }
+          result = await turn;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logs?.log(`invoke error for run ${request.run_id}: ${message}`, "stderr");

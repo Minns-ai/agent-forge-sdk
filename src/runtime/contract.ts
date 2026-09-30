@@ -54,6 +54,16 @@ export interface InvokeRequest {
   caller?: "public";
   /** A collab room's turn (with caller "public"): only what the room shares. */
   collab?: boolean;
+  /** Nobody is waiting on the turn as it runs (a schedule, a durable run): the
+   *  agent may skip checks that only help a reader, like self-critique. */
+  unattended?: boolean;
+  /** Makes a retry of this turn safe: the same key (with the same run_id)
+   *  gets the turn already running or just finished instead of starting it
+   *  again, and a keyed turn is not stopped when its caller hangs up, since
+   *  the caller is expected to ask again. A failed turn is not kept, so a
+   *  retry after a failure runs it afresh. The Temporal worker sends
+   *  `${run_id}:${step}`. */
+  idempotency_key?: string;
 }
 
 /** A file attached to a turn. `url` is a short-lived link to fetch it from;
