@@ -15,9 +15,9 @@ import { createClient } from 'minns-sdk';
 ## Quick Start
 
 ```typescript
-import { createClient } from 'minns-sdk';
+import { MinnsClient } from 'minns-sdk';
 
-const client = createClient("your-api-key");
+const client = new MinnsClient({ apiKey: "your-api-key", baseUrl: "https://minns.ai" });
 
 // 1. Send messages as they arrive (real-time ingestion)
 await client.sendMessage({
