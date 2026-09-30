@@ -119,4 +119,30 @@ describe("serveAgent keyed invokes", () => {
     await (await invoke({ unattended: true, idempotency_key: "r1:0" })).json();
     expect(got).toMatchObject({ run_id: "r1", unattended: true, idempotency_key: "r1:0" });
   });
+
+  it("keeps a streamed retry that picked up a running turn alive until the result", async () => {
+    const h = gated();
+    await serve(h.handler);
+    const first = invoke({ idempotency_key: "r1:0" });
+    await h.running;
+    const retry = fetch(`http://127.0.0.1:${PORT}/v1/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify({ run_id: "r1", input: "hi", idempotency_key: "r1:0" }),
+    });
+    const res = await retry;
+    const reader = res.body!.getReader();
+    const firstLine = await reader.read();
+    expect(JSON.parse(new TextDecoder().decode(firstLine.value).trim().split("\n")[0])).toEqual({ type: "delta", text: " " });
+    h.release();
+    let rest = "";
+    for (;;) {
+      const { done: ended, value } = await reader.read();
+      if (value) rest += new TextDecoder().decode(value);
+      if (ended) break;
+    }
+    const last = JSON.parse(rest.trim().split("\n").pop()!);
+    expect(last).toMatchObject({ type: "result", output: "answer 1" });
+    await (await first).json();
+  }, 30_000);
 });

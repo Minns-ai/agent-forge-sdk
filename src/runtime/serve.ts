@@ -125,6 +125,8 @@ const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
 
 /** How many keyed turns (running or finished) are remembered; the oldest go first. */
 const MAX_KEYED_TURNS = 200;
+/** How often a streamed caller waiting on a turn it picked up hears from it. */
+const KEEP_ALIVE_MS = 20_000;
 
 /**
  * Start the agent HTTP server implementing the control-plane contract. Wires
@@ -208,8 +210,12 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
         };
 
         let result: InvokeResponse;
+        let keepAlive: ReturnType<typeof setInterval> | undefined;
         try {
           let turn = turnKey ? keyedTurns.get(turnKey) : undefined;
+          // A retry that picks up a turn already running gets none of its
+          // deltas, so a streamed one is kept alive with a space every 20 s.
+          if (turn && streaming) keepAlive = setInterval(() => line({ type: "delta", text: " " }), KEEP_ALIVE_MS);
           if (!turn) {
             turn = withRun(request.run_id, () => opts.handler(request, ctx));
             if (turnKey) {
@@ -224,7 +230,9 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
             }
           }
           result = await turn;
+          clearInterval(keepAlive);
         } catch (err) {
+          clearInterval(keepAlive);
           const message = err instanceof Error ? err.message : String(err);
           logs?.log(`invoke error for run ${request.run_id}: ${message}`, "stderr");
           telemetry?.span("agent.invoke", {
