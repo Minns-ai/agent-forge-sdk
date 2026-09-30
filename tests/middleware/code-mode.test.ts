@@ -88,8 +88,8 @@ describe("run_code", () => {
 
   it("describes what is callable from code, and not what is excluded or deferred", () => {
     const d = registry.get("run_code")!.description;
-    expect(d).toContain("tools.list_items(args)");
-    expect(d).toContain("tools.price(args)");
+    expect(d).toMatch(/Callable: .*\blist_items\b/);
+    expect(d).toMatch(/Callable: .*\bprice\b/);
     expect(d).not.toContain("secret_write");
     expect(d).not.toContain("hidden_deferred");
   });

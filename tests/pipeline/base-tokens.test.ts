@@ -6,6 +6,8 @@ import {
   TodoListMiddleware,
   MinnsFullPowerMiddleware,
   StateBackend,
+  SkillsMiddleware,
+  CodeModeMiddleware,
   type LLMMessage,
   type LLMProvider,
   type LLMToolResponse,
@@ -170,6 +172,39 @@ describe("base input tokens", () => {
       new MinnsFullPowerMiddleware({ client }),
     ]);
     expect(m.longestDescription).toBeLessThanOrEqual(160);
+  });
+
+  it("an agent with code mode and a skills catalogue stays under 1,500 tokens", async () => {
+    // run_code used to repeat a line of every callable tool's description
+    // (their schemas are already attached), and the skills catalogue came
+    // with a 150-token how-to. Measured 1,924 before the trim and 1,356 after;
+    // the budget sits about 10% above, well below where it was.
+    const tools = Array.from({ length: 12 }, (_, i) => ({
+      name: `tool_${i}`,
+      description: `Does the ${i}th thing the agent needs, with the details a model reads to choose it over the others.`,
+      parameters: { q: { type: "string" as const, description: "what to do" } },
+      async execute() {
+        return { success: true, result: "ok" };
+      },
+    }));
+    const files = Object.fromEntries(
+      Array.from({ length: 6 }, (_, i) => [
+        `/skills/skill-${i}/SKILL.md`,
+        `---\nname: skill-${i}\ndescription: Use for "the ${i}th kind of task", "another way people ask for it".\n---\n\n# Skill ${i}\n\nSteps.\n`,
+      ]),
+    );
+    const { llm, seen } = capture();
+    await new AgentForge({
+      directive: { identity: "You are a careful software engineer.", goalDescription: "Do what is asked." },
+      llm,
+      agentId: 1,
+      tools,
+      middleware: [new SkillsMiddleware({ backend: new StateBackend({ files }), sources: ["/skills"] }), new CodeModeMiddleware()],
+    }).run("hello", { sessionId: 1 });
+    const first = seen[0];
+    const total = estimateTokens(systemOf(first.messages)) + toolTokens(first.tools);
+    expect(first.tools.map((t) => t.name)).toContain("run_code");
+    expect(total).toBeLessThan(1500);
   });
 
   it("the full minns toolbelt deferred costs a quarter of it loaded", async () => {

@@ -195,26 +195,13 @@ function createLoadSkillTool(
 
 const SKILLS_SYSTEM_PROMPT_HEADER = `
 
-## Skills System
+## Skills
 
-You have access to a skills library that provides specialized capabilities and domain knowledge.
-
-**Available Skills:**
+Instructions for particular kinds of task. When a task matches one, call load_skill with its name first and follow what it says.
 
 `;
 
-const SKILLS_SYSTEM_PROMPT_FOOTER = `
-
-**How to Use Skills (Progressive Disclosure):**
-
-Skills follow a progressive disclosure pattern — you see their name and description above, but only read full instructions when needed:
-
-1. **Recognize when a skill applies**: Check if the user's task matches a skill's description
-2. **Load the skill**: Use the \`load_skill\` tool with the skill name
-3. **Follow the instructions**: The loaded content contains step-by-step workflows and best practices
-4. **Use recommended tools**: Skills may specify which tools to use
-
-When in doubt, check if a skill exists for the task — skills make you more capable and consistent.`;
+const SKILLS_SYSTEM_PROMPT_FOOTER = "";
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
@@ -329,7 +316,7 @@ export class SkillsMiddleware implements Middleware {
 
     const skillList = this.skills
       .map((skill) => {
-        let line = `- **${skill.name}**: ${skill.description}`;
+        let line = `- ${skill.name}: ${skill.description}`;
         if (skill.license) line += ` (License: ${skill.license})`;
         if (skill.allowedTools.length > 0) {
           line += `\n  -> Recommended tools: ${skill.allowedTools.join(", ")}`;

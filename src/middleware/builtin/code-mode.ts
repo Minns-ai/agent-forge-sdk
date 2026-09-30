@@ -126,19 +126,16 @@ export const prepareScript = (code: string): { source: string; stripped: boolean
 export const capText = (text: string, max: number): { text: string; truncated: boolean } =>
   text.length <= max ? { text, truncated: false } : { text: `${text.slice(0, max)}\n[truncated: ${text.length - max} more characters]`, truncated: true };
 
-const describe = (callable: ToolDefinition[], name: string, max: number): string => {
-  const lines = callable.map((t) => `  tools.${t.name}(args): ${t.description.split("\n")[0].slice(0, 100)}`);
-  return (
-    `Run a JavaScript program that calls the agent's tools from code. Use it when one answer needs several tool calls, ` +
-    `a loop over results, a filter, or a join: the program runs in a sandbox and only what it returns comes back, so the ` +
-    `intermediate data never enters the conversation. Each tools.<name>(args) call returns that tool's full result ` +
-    `object ({ success, result } or { success: false, error }), synchronously; there is nothing to await. ` +
-    `console.log lines are returned too. Return the value you want to see. Plain JavaScript only: no imports, no fetch, ` +
-    `no timers, no filesystem beyond the tools. Limits: ${max} tool calls per program.\n` +
-    (lines.length ? `Callable now:\n${lines.join("\n")}` : `No tools are callable from code yet.`) +
-    `\n(Excluded: ${name} itself.)`
-  );
-};
+// The callable tools by name only: their schemas are already in the request,
+// and repeating a line of each description here made this the largest tool
+// the model was sent (about 1,000 tokens with a toolbelt of 27).
+const describe = (callable: ToolDefinition[], name: string, max: number): string =>
+  `Run a JavaScript program that calls your tools from code, for work that needs several calls, a loop, a filter or a join: ` +
+  `only what it returns comes back, so intermediate data stays out of the conversation. tools.<name>(args) takes the same ` +
+  `arguments as the tool and returns its result object ({ success, result } or { success: false, error }) synchronously; ` +
+  `do not await. console.log lines come back too. Plain JavaScript: no imports, fetch, timers or files. At most ${max} tool calls.\n` +
+  (callable.length ? `Callable: ${callable.map((t) => t.name).join(", ")}.` : `No tools are callable from code yet.`) +
+  ` Not ${name} itself.`;
 
 export class CodeModeMiddleware implements Middleware {
   readonly name = "code-mode";
