@@ -198,7 +198,7 @@ const results = await client.searchCode({
 ```typescript
 import { createClient } from 'minns-sdk';
 
-// Simple — API key only (connects to https://minns.ai)
+// Simple — API key only (connects to https://api.minns.ai)
 const client = createClient("your-api-key");
 
 // With default IDs for event builders
@@ -235,7 +235,7 @@ const client = new MinnsClient({
 | `batchMaxSize` | `number` | `10` | Max events before forcing a flush. |
 | `maxQueueSize` | `number` | `1000` | Max local queue depth before `enqueue()` throws. |
 
-> **Note:** The base URL defaults to `https://minns.ai`. Override with `baseUrl` in `MinnsClientConfig`.
+> **Note:** The base URL defaults to `https://api.minns.ai`. Override with `baseUrl` in `MinnsClientConfig`.
 
 ---
 
