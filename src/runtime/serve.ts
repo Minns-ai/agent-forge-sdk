@@ -56,6 +56,8 @@ export interface ServeAgentOptions {
    *  harness reports `{ success: false, error }` rather than a 500. */
   onExecuteCandidate?: (req: ExecuteCandidateRequest) => Promise<ExecuteCandidateResponse>;
   /** Port to listen on. Defaults to PORT env or 8080 (matches the deploy default). */
+  /** How long a streamed turn may be quiet before it pings (KEEP_ALIVE_MS). */
+  keepAliveMs?: number;
   port?: number;
   /** Address to listen on. Defaults to every interface. Pass "127.0.0.1" when a
    *  front server on the same machine (an auth proxy) is the only caller, so the
@@ -125,8 +127,13 @@ const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
 
 /** How many keyed turns (running or finished) are remembered; the oldest go first. */
 const MAX_KEYED_TURNS = 200;
-/** How often a streamed caller waiting on a turn it picked up hears from it. */
-const KEEP_ALIVE_MS = 20_000;
+/** A streamed turn that has said nothing for this long says it is still
+ *  there, with a {"type":"ping"} line: a step at work (a tool call, a browser)
+ *  writes nothing, and proxies drop a connection quiet for about a minute.
+ *  Sent only on silence, so a turn that is writing costs nothing extra; one
+ *  line of a few bytes per quiet turn in 25 s otherwise. Readers skip any line
+ *  type they do not know. */
+export const KEEP_ALIVE_MS = 25_000;
 
 /**
  * Start the agent HTTP server implementing the control-plane contract. Wires
@@ -142,6 +149,7 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
   // Keyed turns by run and key: a retry of one (a worker that timed out or
   // died) gets the same run, in flight or finished, and pays for it once.
   const keyedTurns = new Map<string, Promise<InvokeResponse>>();
+  const quietMs = Math.max(10, opts.keepAliveMs ?? KEEP_ALIVE_MS);
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -199,8 +207,11 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
           res.writeHead(200, { "Content-Type": NDJSON, "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
           res.flushHeaders?.();
         }
+        let wrote = Date.now();
         const line = (o: unknown) => {
-          if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(o)}\n`);
+          if (res.writableEnded || res.destroyed) return;
+          res.write(`${JSON.stringify(o)}\n`);
+          wrote = Date.now();
         };
         const ctx: StepContext = {
           // A keyed turn outlives its caller: the retry that follows a hang-up
@@ -213,9 +224,14 @@ export function serveAgent(opts: ServeAgentOptions): Promise<AgentServer> {
         let keepAlive: ReturnType<typeof setInterval> | undefined;
         try {
           let turn = turnKey ? keyedTurns.get(turnKey) : undefined;
-          // A retry that picks up a turn already running gets none of its
-          // deltas, so a streamed one is kept alive with a space every 20 s.
-          if (turn && streaming) keepAlive = setInterval(() => line({ type: "delta", text: " " }), KEEP_ALIVE_MS);
+          // Kept alive while quiet: a new turn between its words, and a retry
+          // that picked up a running turn, which gets none of its words.
+          if (streaming) {
+            keepAlive = setInterval(() => {
+              if (Date.now() - wrote >= quietMs) line({ type: "ping" });
+            }, Math.ceil(quietMs / 5));
+            keepAlive.unref?.();
+          }
           if (!turn) {
             turn = withRun(request.run_id, () => opts.handler(request, ctx));
             if (turnKey) {

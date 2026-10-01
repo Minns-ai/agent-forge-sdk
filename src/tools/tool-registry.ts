@@ -8,6 +8,8 @@ import type {
 } from "../types.js";
 import { evaluatePolicy, isLoaded, capResultSize, UNPARSEABLE_ARGUMENTS } from "./tool.js";
 import { validateToolArgs } from "./schema-validator.js";
+import { ResultStore } from "./result-store.js";
+import { currentRunId } from "../utils/run-context.js";
 
 /** One tool invocation as seen by the execute wrapper / middleware. */
 export interface ToolCall {
@@ -58,6 +60,51 @@ export class ToolRegistry {
      *  declares its own `timeoutMs`. 0 disables the backstop. */
     private defaultTimeoutMs = 600_000,
   ) {}
+
+  // ─── Large results ────────────────────────────────────────────────────────
+  //
+  // Once a reader is attached (run_code: CodeModeMiddleware), an answer over
+  // the model's budget is kept whole for the run and the model gets a preview
+  // with its handle (tools/result-store.ts), so it reads the rest from code
+  // instead of paying for the whole answer in every later step, or calling
+  // the tool again. A program's own calls get the whole answer.
+
+  private results: { store: ResultStore; previewBytes: number; programBytes: number } | null = null;
+
+  /** Keep large answers whole, readable from programs by handle. `previewBytes`:
+   *  the most of an answer the model is shown (default 24 KB, about 6k
+   *  tokens). `programBytes`: the most a program is handed (default 8 MB). */
+  enableResultHandles(opts: { previewBytes?: number; programBytes?: number; store?: ResultStore } = {}): void {
+    if (this.results) return;
+    this.results = {
+      store: opts.store ?? new ResultStore(),
+      previewBytes: Math.max(1024, opts.previewBytes ?? 24 * 1024),
+      programBytes: Math.max(64 * 1024, opts.programBytes ?? 8 * 1024 * 1024),
+    };
+  }
+
+  /** Whether large answers are kept for programs to read. */
+  get keepsResults(): boolean {
+    return !!this.results;
+  }
+
+  /** The run large answers are kept under: the run in progress, else the session. */
+  private runKey(context: ToolContext): string {
+    return currentRunId() ?? `session:${context.sessionId}`;
+  }
+
+  /** Keep a whole answer for the run; its handle, or null when nothing keeps answers. */
+  keepResult(context: ToolContext, value: unknown, bytes: number): string | null {
+    return this.results ? this.results.store.put(this.runKey(context), value, bytes) : null;
+  }
+
+  /** A kept answer by its handle, for a program. */
+  readResult(context: ToolContext, ref: string): ToolResult {
+    const value = this.results?.store.get(this.runKey(context), ref);
+    return value === undefined
+      ? { success: false, failure: "invalid_input", error: `nothing is kept as ${ref || "that"} in this run: call the tool again from the program instead` }
+      : { success: true, result: value };
+  }
 
   /** Register a tool definition */
   register(tool: ToolDefinition): void {
@@ -352,9 +399,12 @@ export class ToolRegistry {
       return { success: false, failure, error: message };
     }
 
-    // 4. Bound the serialized result so one payload can't blow out context.
-    const cap = tool.maxResultBytes ?? this.defaultMaxResultBytes;
-    const bounded = capResultSize(result, cap);
+    // 4. Bound the serialized result so one payload can't blow out context. A
+    // program gets the whole answer up to its ceiling; the model gets a
+    // preview, and with a reader attached the whole answer is kept by handle.
+    const handles = this.results;
+    const cap = opts?.fromProgram && handles ? handles.programBytes : (tool.maxResultBytes ?? (handles ? handles.previewBytes : this.defaultMaxResultBytes));
+    const bounded = capResultSize(result, cap, handles ? (value, bytes) => this.keepResult(context, value, bytes) : undefined);
     if (!bounded.success && !bounded.failure) bounded.failure = "error";
     return bounded;
   }

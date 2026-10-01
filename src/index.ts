@@ -140,6 +140,7 @@ export {
   planToolBatches,
   evaluatePolicy,
   capResultSize,
+  capNote,
   orderToolsForCache,
   UNPARSEABLE_ARGUMENTS,
 } from "./tools/tool.js";
@@ -279,6 +280,8 @@ export type { CodeModeConfig } from "./middleware/builtin/code-mode.js";
 export type { WorkspaceOptions, Workspace } from "./middleware/builtin/workspace.js";
 export type { ShellConfig } from "./middleware/builtin/shell.js";
 export type { FilesystemConfig } from "./middleware/builtin/filesystem.js";
+export { ResultStore, previewOf } from "./tools/result-store.js";
+export type { ResultStoreConfig } from "./tools/result-store.js";
 export { ToolResultEvictionMiddleware } from "./middleware/builtin/tool-result-eviction.js";
 export type { ToolResultEvictionConfig } from "./middleware/builtin/tool-result-eviction.js";
 export { ArgumentTruncationMiddleware } from "./middleware/builtin/argument-truncation.js";

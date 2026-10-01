@@ -128,7 +128,7 @@ describe("run_code", () => {
       `return { s: typeof tools.secret_write, h: typeof tools.hidden_deferred, u: typeof tools.nope, keys: Object.keys(tools).sort() };`,
     );
     expect(out.success).toBe(true);
-    expect(out.result.value).toEqual({ s: "undefined", h: "undefined", u: "undefined", keys: ["list_items", "price"] });
+    expect(out.result.value).toEqual({ s: "undefined", h: "undefined", u: "undefined", keys: ["list_items", "price", "read_result"] });
   });
 
   it("stops a program that runs past the deadline and says why", async () => {

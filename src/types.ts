@@ -181,6 +181,10 @@ export interface ToolExecuteOptions {
     params: Record<string, any>,
     reason: string,
   ) => boolean | Promise<boolean>;
+  /** The call comes from a program (run_code), not the model: the program
+   *  gets the whole answer, since only what it returns reaches the model.
+   *  Bounded by the program ceiling instead of the model's budget. */
+  fromProgram?: boolean;
 }
 
 export interface ToolContext {

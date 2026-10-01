@@ -51,6 +51,11 @@ src/
   tools/
     tool.ts             — Capability layer: buildTool() (safe defaults), planToolBatches (concurrency), evaluatePolicy (allow/deny/ask), capResultSize
     tool-registry.ts    — ToolRegistry: register, disclose (loaded/deferred/search), authorize, safely execute tools (validate → authorize → execute → cap)
+    result-store.ts     : large answers. Once run_code is attached (enableResultHandles), an answer over the model's
+                          budget (24 KB) is kept whole per run under a handle and the model gets previewOf (same
+                          shape, lists cut first, valid JSON) plus the handle; a program's own calls (fromProgram)
+                          get the whole answer up to 8 MB, and tools.read_result({ ref }) reads a kept one. Bounded:
+                          16 per run, 64 MB, an hour
     sandbox/
       protocol.ts       — SandboxBackend: where a shell command runs (exec → stdout/stderr/exit/timedOut)
       local-sandbox.ts  — LocalSandbox: /bin/sh inside one directory, own process group, time + output caps, no host secrets

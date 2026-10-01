@@ -44,7 +44,7 @@ const gated = () => {
 
 const serve = async (handler: (req: InvokeRequest, ctx?: StepContext) => Promise<InvokeResponse>) => {
   PORT += 1;
-  server = await serveAgent({ handler, port: PORT, host: "127.0.0.1", env: {}, telemetry: null, logs: null, a2a: false });
+  server = await serveAgent({ handler, port: PORT, host: "127.0.0.1", env: {}, telemetry: null, logs: null, a2a: false, keepAliveMs: 50 });
 };
 
 describe("serveAgent keyed invokes", () => {
@@ -120,6 +120,23 @@ describe("serveAgent keyed invokes", () => {
     expect(got).toMatchObject({ run_id: "r1", unattended: true, idempotency_key: "r1:0" });
   });
 
+  it("pings a new streamed turn while it is quiet, and never adds to its words", async () => {
+    const h = gated();
+    await serve(h.handler);
+    const res = await fetch(`http://127.0.0.1:${PORT}/v1/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify({ run_id: "r9", input: "hi" }),
+    });
+    await h.running;
+    await new Promise((r) => setTimeout(r, 160));
+    h.release();
+    const lines = (await res.text()).trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines.filter((l) => l.type === "ping").length).toBeGreaterThan(0);
+    expect(lines.filter((l) => l.type === "delta")).toEqual([]);
+    expect(lines.at(-1)).toMatchObject({ type: "result", output: "answer 1" });
+  });
+
   it("keeps a streamed retry that picked up a running turn alive until the result", async () => {
     const h = gated();
     await serve(h.handler);
@@ -133,7 +150,7 @@ describe("serveAgent keyed invokes", () => {
     const res = await retry;
     const reader = res.body!.getReader();
     const firstLine = await reader.read();
-    expect(JSON.parse(new TextDecoder().decode(firstLine.value).trim().split("\n")[0])).toEqual({ type: "delta", text: " " });
+    expect(JSON.parse(new TextDecoder().decode(firstLine.value).trim().split("\n")[0])).toEqual({ type: "ping" });
     h.release();
     let rest = "";
     for (;;) {

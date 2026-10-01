@@ -1,7 +1,8 @@
 import type { Middleware, MiddlewareContext, PipelineState } from "../types.js";
 import type { ToolContext, ToolDefinition, ToolResult } from "../../types.js";
 import type { ToolRegistry } from "../../tools/tool-registry.js";
-import { buildTool } from "../../tools/tool.js";
+import { buildTool, capNote } from "../../tools/tool.js";
+import { previewOf } from "../../tools/result-store.js";
 
 // Programmatic tool calling. One tool, `run_code`, takes a JavaScript program
 // and runs it in a QuickJS sandbox (a WASM interpreter with no host access:
@@ -11,9 +12,12 @@ import { buildTool } from "../../tools/tool.js";
 // intermediate data never enters the context window.
 //
 // Every call from inside the script goes through ToolRegistry.execute, so the
-// validate / authorize / approval / size-cap pipeline applies exactly as it
-// does to a direct call. What the script can reach is what the model could
-// reach directly: the disclosed tools (deferred ones stay behind find_tools).
+// validate / authorize / approval pipeline applies exactly as it does to a
+// direct call. What the script can reach is what the model could reach
+// directly: the disclosed tools (deferred ones stay behind find_tools). A
+// script gets each answer whole (up to the registry's program ceiling), since
+// only what it returns reaches the model; an answer too large for the model
+// is kept by handle, and tools.read_result({ ref }) reads it whole here.
 //
 // The sandbox is synchronous from the script's point of view. A host tool call
 // suspends the interpreter (asyncify) and resumes it with the result, so
@@ -73,6 +77,9 @@ export interface QuickJSContextLike {
   evalCodeAsync(code: string, filename?: string): Promise<{ error?: QuickJSHandleLike; value?: QuickJSHandleLike }>;
   dispose(): void;
 }
+
+/** The program's own call for a kept answer (ToolRegistry.readResult). */
+export const READ_RESULT = "read_result";
 
 const DEFAULTS = {
   timeoutMs: 30_000,
@@ -173,6 +180,8 @@ export class CodeModeMiddleware implements Middleware {
    *  description so the model sees what it can call from code right now. */
   async beforeExecute(_state: PipelineState, context: MiddlewareContext): Promise<void> {
     this.registry = context.toolRegistry;
+    // There is now a place to read a large answer whole: keep them.
+    context.toolRegistry.enableResultHandles();
     context.toolRegistry.replace(this.cfg.toolName, this.tool(this.callable()));
   }
 
@@ -242,15 +251,26 @@ export class CodeModeMiddleware implements Middleware {
     const vm = rt.newContext();
     const own: QuickJSHandleLike[] = [];
     try {
-      const has = vm.newFunction("__has", (h) => (callable.has(vm.getString(h)) ? vm.newString("1") : undefined));
-      const names = vm.newFunction("__names", () => vm.newString(JSON.stringify([...callable.keys()])));
+      // read_result is the program's own: a kept answer, read whole, never a
+      // tool the model is sent (it would cost its schema in every request).
+      const isCallable = (n: string) => n === READ_RESULT || callable.has(n);
+      const has = vm.newFunction("__has", (h) => (isCallable(vm.getString(h)) ? vm.newString("1") : undefined));
+      const names = vm.newFunction("__names", () => vm.newString(JSON.stringify([...callable.keys(), READ_RESULT])));
       const log = vm.newFunction("__log", (h) => {
         if (logs.join("\n").length < this.cfg.maxOutputChars) logs.push(vm.getString(h));
       });
       const call = vm.newAsyncifiedFunction("__call", async (nameH, argsH) => {
         const name = vm.getString(nameH);
         let result: ToolResult;
-        if (!callable.has(name)) {
+        if (name === READ_RESULT) {
+          let ref = "";
+          try {
+            ref = String((JSON.parse(vm.getString(argsH)) as { ref?: unknown } | null)?.ref ?? "");
+          } catch {
+            ref = "";
+          }
+          result = registry.readResult(context, ref);
+        } else if (!callable.has(name)) {
           result = { success: false, error: `no tool named ${name} is callable from code` };
         } else if (calls.length >= this.cfg.maxToolCalls) {
           result = { success: false, error: `tool call budget of ${this.cfg.maxToolCalls} per program reached` };
@@ -263,7 +283,7 @@ export class CodeModeMiddleware implements Middleware {
             args = {};
           }
           calls.push(name);
-          result = await registry.execute(name, args, context);
+          result = await registry.execute(name, args, context, { fromProgram: true });
         }
         const { contextMessages: _dropped, ...forScript } = result;
         return vm.newString(JSON.stringify(forScript));
@@ -308,16 +328,21 @@ export class CodeModeMiddleware implements Middleware {
       } catch {
         serialised = String(value);
       }
-      const capped = capText(serialised, this.cfg.maxOutputChars);
+      // Too much to hand back: its shape, and the whole of it kept by handle.
+      const over = serialised.length > this.cfg.maxOutputChars;
+      const ref = over && value !== undefined ? registry.keepResult(context, value, Buffer.byteLength(serialised)) : null;
       return {
         success: true,
         result: {
-          value: capped.truncated ? capped.text : value,
+          value: over ? (value === undefined ? capText(serialised, this.cfg.maxOutputChars).text : previewOf(value, this.cfg.maxOutputChars)) : value,
           logs: logs.slice(0, 200),
           toolCalls: calls.length,
-          ...(script.stripped ? { note: "await/async removed: programs run synchronously" } : {}),
+          ...(over && ref ? { result_ref: ref } : {}),
+          ...(over || script.stripped
+            ? { note: [over ? capNote(Buffer.byteLength(serialised), ref) : "", script.stripped ? "await/async removed: programs run synchronously" : ""].filter(Boolean).join(" ") }
+            : {}),
         },
-        ...(capped.truncated ? { truncated: true } : {}),
+        ...(over ? { truncated: true } : {}),
         display: `${this.cfg.toolName}: ${calls.length} tool call${calls.length === 1 ? "" : "s"}`,
       };
     } finally {

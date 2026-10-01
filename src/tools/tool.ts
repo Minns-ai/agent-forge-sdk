@@ -5,6 +5,7 @@ import type {
   PolicyOutcome,
   ToolEffect,
 } from "../types.js";
+import { previewOf } from "./result-store.js";
 
 /**
  * Tool capability layer.
@@ -192,37 +193,49 @@ export function evaluatePolicy(
 
 // ─── Result size guard ───────────────────────────────────────────────────────
 
+/** What a result over its cap says, with its handle when it was kept whole. Pure. */
+export const capNote = (bytes: number, ref: string | null): string =>
+  ref
+    ? `This answer is ${bytes} bytes, so only a preview is shown, with its shape kept. The whole answer is kept as ${ref}: ` +
+      `to use all of it, call tools.read_result({ ref: "${ref}" }) inside run_code and return only what you need. Do not call the tool again for it.`
+    : `This answer is ${bytes} bytes, so only a preview is shown, with its shape kept. If you need more, ask for less: a filter, fewer results, or a page.`;
+
 /**
  * Bound a tool result's serialized size so a single huge payload cannot blow
  * out the model's context. When the JSON-serialized `result` exceeds
- * `maxBytes`, it is replaced with a truncated preview and flagged
- * `truncated: true`; `success`/`error` are preserved. A non-positive or absent
- * cap is a no-op. Never throws — a result that cannot be serialized is left
- * untouched.
+ * `maxBytes`, it is replaced with a preview that keeps its shape (the same
+ * keys, lists cut to their first items, long texts clipped; always valid
+ * JSON) and flagged `truncated: true`; `success`/`error` are preserved.
+ * `keep`: hold the whole result and answer its handle, which the preview
+ * then names. A non-positive or absent cap is a no-op. Never throws: a result
+ * that cannot be serialized is left untouched.
  */
-export function capResultSize(result: ToolResult, maxBytes: number | undefined): ToolResult {
+export function capResultSize(
+  result: ToolResult,
+  maxBytes: number | undefined,
+  keep?: (value: unknown, bytes: number) => string | null,
+): ToolResult {
   if (!maxBytes || maxBytes <= 0 || result.result === undefined) return result;
-  let serialized: string;
+  let serialized: string | undefined;
   try {
     serialized = typeof result.result === "string" ? result.result : JSON.stringify(result.result);
   } catch {
-    return result; // unserializable (circular/BigInt) — leave as-is for the caller
+    return result; // unserializable (circular/BigInt): leave as-is for the caller
   }
   if (serialized === undefined) return result;
   const bytes = Buffer.byteLength(serialized);
   if (bytes <= maxBytes) return result;
-  // Slice by BYTES, not UTF-16 code units, so the preview actually honours the
-  // byte cap on multi-byte (CJK/emoji) text. A split trailing codepoint decodes
-  // to U+FFFD — fine for a preview.
-  const preview = Buffer.from(serialized, "utf8").subarray(0, maxBytes).toString("utf8");
+  const ref = keep ? keep(result.result, bytes) : null;
+  const note = capNote(bytes, ref);
   return {
     ...result,
     truncated: true,
     result: {
       truncated: true,
       original_bytes: bytes,
-      preview,
-      note: `result was ${bytes} bytes, truncated to ${maxBytes} — refine the call or request a narrower slice`,
+      ...(ref ? { result_ref: ref } : {}),
+      preview: previewOf(result.result, Math.max(200, maxBytes - Buffer.byteLength(note) - 120)),
+      note,
     },
   };
 }
