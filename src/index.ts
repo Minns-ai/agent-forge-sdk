@@ -213,6 +213,7 @@ export { PipelineTimer } from "./utils/timer.js";
 export { computeContextFingerprint } from "./utils/fingerprint.js";
 export { safeJsonParse, canonicalizeJson } from "./utils/json.js";
 export { noteFailure, noted, notedFallback } from "./utils/failure.js";
+export { Semaphore } from "./utils/semaphore.js";
 
 // ─── Reasoning ──────────────────────────────────────────────────────────────
 export { MetaReasoner } from "./reasoning/meta-reasoner.js";
@@ -405,6 +406,7 @@ export { Coordinator } from "./coordinator/coordinator.js";
 export type {
   WorkerEffect,
   CoordinatorTask,
+  WorkerContext,
   WorkerOutcome,
   CoordinatorConfig,
   CoordinatorResult,

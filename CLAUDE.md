@@ -34,7 +34,8 @@ src/
     task.ts             — Task lifecycle: TaskStatus/TaskType, isTerminalTaskStatus guard, canTransition, generateTaskId (type-prefixed crypto ids), TaskTable (guarded mutations)
 
   coordinator/
-    coordinator.ts      — Coordinator: fan-out/fan-in multi-agent (read-concurrent/write-serial, push-not-poll, self-contained workers, continue-vs-spawn, synthesize)
+    coordinator.ts      — Coordinator: fan-out/fan-in multi-agent (read-concurrent/write-serial, push-not-poll, self-contained workers,
+                          continue-vs-spawn, synthesize; maxConcurrent, a timeout per worker and a signal, each worker handed its own)
 
   memory/
     memory-manager.ts   — MemoryManager: searchClaims + query in parallel
@@ -161,6 +162,7 @@ src/
     timer.ts            — PipelineTimer: phase timing
     json.ts             — safeJsonParse, canonicalizeJson
     fingerprint.ts      — computeContextFingerprint
+    semaphore.ts        — Semaphore: a cap as a queue, never a sleep-and-poll (the coordinator, `delegate`)
 ```
 
 ## Runtime bridge (deploy-time contract)

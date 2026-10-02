@@ -574,6 +574,11 @@ export interface AgentForgeConfig {
   reasoning?: ReasoningConfig;
   /** Sub-agent definitions for delegation */
   subAgents?: import("./subagent/types.js").SubAgentDefinition[];
+  /** How `delegate` runs its workers: at most `maxConcurrent` at once
+   *  (default 4; the rest wait their turn), each for at most `timeoutMs`
+   *  (default no limit; a worker past it is stopped and the orchestrator
+   *  told). */
+  delegation?: { maxConcurrent?: number; timeoutMs?: number };
   /** Shared service instances accessible to all tools via context.services */
   services?: Record<string, any>;
   /**

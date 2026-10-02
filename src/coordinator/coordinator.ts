@@ -19,6 +19,8 @@
  * production.
  */
 
+import { Semaphore } from "../utils/semaphore.js";
+
 /** read ⇒ safe to run concurrently; write ⇒ serial barrier (mutates shared state). */
 export type WorkerEffect = "read" | "write";
 
@@ -45,12 +47,35 @@ export interface WorkerOutcome<R = unknown> {
   result: R | null;
   error?: string;
   duration_ms: number;
+  /** The worker ran past `timeoutMs` and was told to stop (its signal). */
+  timedOut?: true;
+  /** The coordinator's signal fired before this worker started, or while it
+   *  ran; the worker was told to stop (its signal) or never started. */
+  cancelled?: true;
+}
+
+/** What a worker is handed beside its task. */
+export interface WorkerContext {
+  /** Fires on the coordinator's own signal, and at the worker's timeout. A
+   *  worker that honours it stops early; one that does not is still
+   *  reported as timed out or cancelled the moment it fires. */
+  signal: AbortSignal;
 }
 
 export interface CoordinatorConfig<R = unknown> {
   /** Execute one worker task. Wire to SimpleAgent/SubAgentRunner in production;
    *  inject a fake in tests. May throw — the coordinator captures it. */
-  runWorker: (task: CoordinatorTask) => Promise<R>;
+  runWorker: (task: CoordinatorTask, ctx: WorkerContext) => Promise<R>;
+  /** At most this many workers at once within a parallel batch (default:
+   *  the whole batch). */
+  maxConcurrent?: number;
+  /** A worker running longer than this is reported with `timedOut` and its
+   *  signal fired; the batch moves on. Default: no limit. */
+  timeoutMs?: number;
+  /** Stops the coordination: workers not yet started are reported
+   *  `cancelled` without running, workers in flight get their signal and are
+   *  reported `cancelled` as soon as it fires, and no later batch starts. */
+  signal?: AbortSignal;
   /** Optional fan-in step over ALL outcomes (in original order) → combined
    *  output. Runs only after every worker settles. */
   synthesize?: (outcomes: Array<WorkerOutcome<R>>) => Promise<string> | string;
@@ -109,20 +134,46 @@ export class Coordinator<R = unknown> {
     // that appears twice in the input maps to two distinct outcome slots.
     const indexed: IndexedTask[] = tasks.map((task, index) => ({ task, index }));
 
+    const { signal, timeoutMs, maxConcurrent } = this.config;
+    const gate = maxConcurrent !== undefined ? new Semaphore(maxConcurrent) : null;
+
     const runOne = async ({ task, index }: IndexedTask): Promise<void> => {
       const start = this.now();
       let outcome: WorkerOutcome<R>;
-      try {
-        const result = await this.config.runWorker(task);
-        outcome = { task, index, result, duration_ms: this.now() - start };
-      } catch (err) {
-        outcome = {
-          task,
-          index,
-          result: null,
-          error: err instanceof Error ? err.message : String(err),
-          duration_ms: this.now() - start,
-        };
+      if (signal?.aborted) {
+        outcome = { task, index, result: null, error: "cancelled before it started", cancelled: true, duration_ms: 0 };
+      } else {
+        // The worker's own signal: the coordinator's, and its timeout.
+        const ctl = new AbortController();
+        const onAbort = () => ctl.abort(new Error("cancelled"));
+        signal?.addEventListener("abort", onAbort, { once: true });
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const stopped = new Promise<"timeout" | "cancelled">((resolve) => {
+          if (timeoutMs !== undefined) timer = setTimeout(() => (ctl.abort(new Error("timed out")), resolve("timeout")), timeoutMs);
+          ctl.signal.addEventListener("abort", () => resolve(signal?.aborted ? "cancelled" : "timeout"), { once: true });
+        });
+        try {
+          const run = gate ? gate.run(() => this.config.runWorker(task, { signal: ctl.signal }), ctl.signal) : this.config.runWorker(task, { signal: ctl.signal });
+          const settled = await Promise.race([run.then((result) => ({ result })), stopped.then((why) => ({ why }))]);
+          if ("result" in settled) outcome = { task, index, result: settled.result, duration_ms: this.now() - start };
+          else if (settled.why === "timeout") outcome = { task, index, result: null, error: `timed out after ${timeoutMs} ms`, timedOut: true, duration_ms: this.now() - start };
+          else outcome = { task, index, result: null, error: "cancelled", cancelled: true, duration_ms: this.now() - start };
+          // A worker that ends after it was told to stop is not waited for,
+          // and its late result or error goes nowhere.
+          if ("why" in settled) run.catch(() => undefined);
+        } catch (err) {
+          outcome = {
+            task,
+            index,
+            result: null,
+            error: err instanceof Error ? err.message : String(err),
+            ...(ctl.signal.aborted ? (signal?.aborted ? { cancelled: true as const } : { timedOut: true as const }) : {}),
+            duration_ms: this.now() - start,
+          };
+        } finally {
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+        }
       }
       outcomes[index] = outcome;
       // Push the outcome the moment it settles.

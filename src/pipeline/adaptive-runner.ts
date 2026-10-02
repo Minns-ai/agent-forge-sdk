@@ -47,6 +47,7 @@ import { selectBestContext } from "../memory/context-ranker.js";
 
 // Sub-agents
 import { SubAgentRunner } from "../subagent/sub-agent.js";
+import { Semaphore } from "../utils/semaphore.js";
 
 // Legacy phases (used only in graph pipeline path)
 import { runMemoryRetrievalPhase } from "./phases/memory-retrieval-phase.js";
@@ -348,8 +349,9 @@ export class AdaptiveRunner {
   // orchestrator can hand isolated subtasks to via the `delegate` tool.
   private subAgentDefs = new Map<string, SubAgentDefinition>();
   private parentTools: ToolDefinition[] = [];
-  private activeDelegations = 0;
-  private maxConcurrentDelegations = 4;
+  /** The `delegate` tool's cap on workers at once, and how long one may run. */
+  private readonly delegations: Semaphore;
+  private readonly delegationTimeoutMs: number | undefined;
 
   constructor(params: {
     directive: Directive;
@@ -357,6 +359,9 @@ export class AdaptiveRunner {
     /** Runs self-critique; the agent's own model when omitted. */
     lightLlm?: LLMProvider;
     client: any;
+    /** How `delegate` runs workers: at most `maxConcurrent` at once (4), each
+     *  for at most `timeoutMs` (no limit). */
+    delegation?: { maxConcurrent?: number; timeoutMs?: number };
     memoryProvider?: import("../memory/provider.js").MemoryIntegration | null;
     agentId: number;
     tools: ToolDefinition[];
@@ -432,6 +437,8 @@ export class AdaptiveRunner {
     // (Previously `subAgents` only fed a SubAgentRunner whose execute() was never
     // called, so configured sub-agents did nothing.)
     this.subAgentRunner = new SubAgentRunner(params.llm, params.client);
+    this.delegations = new Semaphore(Math.max(1, Math.floor(params.delegation?.maxConcurrent ?? 4)));
+    this.delegationTimeoutMs = params.delegation?.timeoutMs;
     if (params.subAgents?.length) {
       this.subAgentRunner.registerAll(params.subAgents);
       for (const sa of params.subAgents) this.subAgentDefs.set(sa.name, sa);
@@ -479,11 +486,12 @@ export class AdaptiveRunner {
     }
     if (!task.trim()) return { success: false, error: "task is required" };
 
-    // Concurrency guard — cap simultaneous workers.
-    while (this.activeDelegations >= this.maxConcurrentDelegations) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    this.activeDelegations++;
+    // A slot: at most `maxConcurrent` workers run at once, the rest wait in
+    // order. A worker past its time is told to stop (its signal, between
+    // steps) and reported as timed out now.
+    const release = await this.delegations.acquire();
+    const ctl = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | null = null;
     try {
       // Worker uses its own model when the definition overrode it (cheaper models
       // for scoped work), else the orchestrator's. Its tools are the definition's
@@ -511,12 +519,22 @@ export class AdaptiveRunner {
         conversationHistory: [],
         goalDescription: task,
       };
-      const result = await worker.run(task, session, this.agentId);
+      const run = worker.run(task, session, this.agentId, undefined, undefined, { signal: ctl.signal });
+      const limit = this.delegationTimeoutMs;
+      const timedOut = new Promise<null>((resolve) => {
+        if (limit !== undefined) timer = setTimeout(() => (ctl.abort(new Error("timed out")), resolve(null)), limit);
+      });
+      const result = await Promise.race([run, timedOut]);
+      if (!result) {
+        run.catch(() => undefined);
+        return { success: false, error: `Worker "${name}" ran past ${limit} ms and was stopped` };
+      }
       return { success: true, result: { worker: name, summary: result.message } };
     } catch (err: any) {
       return { success: false, error: `Worker "${name}" failed: ${err?.message ?? "unknown error"}` };
     } finally {
-      this.activeDelegations--;
+      if (timer) clearTimeout(timer);
+      release();
     }
   }
 

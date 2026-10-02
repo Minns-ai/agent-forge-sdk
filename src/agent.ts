@@ -117,6 +117,7 @@ export class AgentForge {
       maxHistory: this.config.maxHistory,
       reasoning: this.config.reasoning,
       subAgents: this.config.subAgents,
+      delegation: this.config.delegation,
       services: this.config.services,
       middleware: this.config.middleware,
       toolPolicy: this.config.toolPolicy,

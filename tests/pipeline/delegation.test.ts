@@ -74,3 +74,41 @@ describe("orchestrator-worker delegation", () => {
     expect(result.message).toContain("worker found");
   });
 });
+
+describe("delegation rails", () => {
+  it("stops a worker that runs past delegation.timeoutMs and tells the orchestrator", async () => {
+    class SlowWorkerLLM extends FakeLLM {
+      async complete(messages: LLMMessage[]): Promise<string> {
+        const sys = messages.find((m) => m.role === "system")?.content;
+        if (typeof sys === "string" && sys.includes("You research")) {
+          this.workerRan = true;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        return "worker found: 42";
+      }
+    }
+    const llm = new SlowWorkerLLM();
+    const seen: string[] = [];
+    const agent = new AgentForge({
+      directive: { identity: "orchestrator", goalDescription: "answer via workers", maxIterations: 5 },
+      llm,
+      agentId: 3,
+      subAgents: [{ name: "researcher", directive: { identity: "You research", goalDescription: "research" } }],
+      delegation: { timeoutMs: 30, maxConcurrent: 1 },
+      middleware: [
+        {
+          name: "spy",
+          wrapToolCall: async (call: any, next: any) => {
+            const out = await next(call);
+            if (call.name === "delegate") seen.push(JSON.stringify(out));
+            return out;
+          },
+        } as any,
+      ],
+    });
+    const result = await agent.run("answer the question", { sessionId: 3 });
+    expect(llm.workerRan).toBe(true);
+    expect(seen.join("\n")).toMatch(/ran past 30 ms and was stopped/);
+    expect(result.message).toContain("final answer");
+  });
+});
