@@ -187,13 +187,13 @@ export class AnthropicProvider implements LLMProvider {
       } else if (m.role === "tool" && m.toolCallId) {
         // Tool result → Anthropic tool_result block. Mark failures with is_error
         // so Claude treats them as recoverable and self-corrects (2-3 retries)
-        // rather than giving up. Tool results are string-typed in practice —
-        // degrade any block content to text.
+        // rather than giving up. A result with content blocks (a picture the
+        // tool took) goes as those blocks, which tool_result takes natively.
         const toolText = typeof m.content === "string" ? m.content : contentToText(m.content);
         const block: any = {
           type: "tool_result",
           tool_use_id: m.toolCallId,
-          content: toolText,
+          content: typeof m.content === "string" ? m.content : m.content.map(toAnthropicBlock),
         };
         if (/"success"\s*:\s*false/.test(toolText ?? "")) block.is_error = true;
         // Batch CONSECUTIVE tool results into a SINGLE user message. Parallel

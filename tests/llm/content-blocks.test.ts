@@ -6,8 +6,7 @@ import {
   textBlock,
   imageBlock,
   documentBlock,
-  pdfFromBase64,
-} from "../../src/llm/content.js";
+  pdfFromBase64, toolResultContent } from "../../src/llm/content.js";
 import {
   compactMessages,
   microCompact,
@@ -265,6 +264,49 @@ describe("AnthropicProvider multimodal serialization", () => {
       { type: "tool_result", tool_use_id: "t1", content: '{"success":true}' },
       { type: "tool_result", tool_use_id: "t2", content: '{"success":false}', is_error: true },
     ]);
+  });
+});
+
+describe("AnthropicProvider tool results with content blocks", () => {
+  it("sends a tool result's blocks (a picture) as the tool_result's own content, is_error still read from the text", async () => {
+    const { client, create } = fakeAnthropicClient();
+    const provider = makeAnthropicProvider(client);
+    await provider.completeWithTools(
+      [
+        { role: "user", content: "look" },
+        { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "browser", arguments: { action: "look", shot: true } }, { id: "t2", name: "browser", arguments: { action: "click" } }] },
+        {
+          role: "tool",
+          toolCallId: "t1",
+          content: [
+            { type: "text", text: '{"success":true,"result":"[0-1] button: Search"}' },
+            { type: "image", source: { type: "base64", mediaType: "image/jpeg", data: "AAAA" } },
+          ],
+        },
+        { role: "tool", toolCallId: "t2", content: [{ type: "text", text: '{"success":false,"error":"lost"}' }] },
+      ],
+      TOOLS,
+    );
+    const msgs = (create.mock.calls[0][0] as any).messages;
+    expect(msgs[2].content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "t1",
+        content: [
+          { type: "text", text: '{"success":true,"result":"[0-1] button: Search"}' },
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "AAAA" } },
+        ],
+      },
+      { type: "tool_result", tool_use_id: "t2", content: [{ type: "text", text: '{"success":false,"error":"lost"}' }], is_error: true },
+    ]);
+  });
+
+  it("shapes a ToolResult with content as its JSON text then the blocks, and one without as the JSON alone", () => {
+    const image = { type: "image" as const, source: { type: "base64" as const, mediaType: "image/jpeg", data: "AAAA" } };
+    expect(toolResultContent({ success: true, result: "page", content: [image] })).toEqual([{ type: "text", text: '{"success":true,"result":"page"}' }, image]);
+    expect(toolResultContent({ success: true, result: "page" })).toBe('{"success":true,"result":"page"}');
+    expect(toolResultContent({ success: true, result: "page", content: [] }, "again")).toBe('{"success":true,"result":"page","note":"again"}');
+    expect(contentToText(toolResultContent({ success: true, result: "page", content: [image] }))).toBe('{"success":true,"result":"page"}\n[image]');
   });
 });
 

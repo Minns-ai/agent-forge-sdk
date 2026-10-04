@@ -111,6 +111,14 @@ export interface ToolResult {
   success: boolean;
   result?: any;
   error?: string;
+  /** What the model sees beside `result`, as content blocks: a picture a
+   *  browser took, a page rendered. `result` stays the text the registry
+   *  sizes, telemetry records and a text-only provider reads; the blocks go
+   *  to the model as the tool result's own content (Anthropic: tool_result
+   *  with image blocks; OpenAI: a placeholder per block). Never put in
+   *  `result` what belongs here, and keep it to a few pictures: each one
+   *  costs what a long page does. */
+  content?: ContentBlock[];
   /** Synthetic messages to inject into the transcript after this call — e.g. a
    *  sub-agent summary or a follow-up instruction the tool wants the model to
    *  see. */

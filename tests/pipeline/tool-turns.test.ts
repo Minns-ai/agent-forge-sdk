@@ -42,6 +42,28 @@ const echo = (name: string, effect: "read" | "write" = "read", delayMs = 0): Too
     },
   });
 
+describe("a tool result's content blocks reach the model", () => {
+  it("puts the result's JSON first and the blocks after it in the tool message, and leaves a plain result as the JSON string", async () => {
+    const image = { type: "image" as const, source: { type: "base64" as const, mediaType: "image/jpeg", data: "AAAA" } };
+    const look = buildTool({
+      name: "look",
+      description: "look",
+      effect: "read",
+      parameters: {},
+      async execute() {
+        return { success: true, result: "[0-1] button: Search", content: [image] };
+      },
+    });
+    const { llm, requests } = scripted([[call("a", "look"), call("b", "echo")]]);
+    const agent = new AgentForge({ directive: { identity: "T", goalDescription: "g" }, llm, tools: [look, echo("echo")] });
+    await agent.run("look at the page", { sessionId: 1 });
+    expect(requests).toHaveLength(2);
+    const tools = toolMessages(requests[1]);
+    expect(tools[0].content).toEqual([{ type: "text", text: '{"success":true,"result":"[0-1] button: Search"}' }, image]);
+    expect(typeof tools[1].content).toBe("string");
+  });
+});
+
 describe("the step cap", () => {
   it("defaults to 25 steps when the agent sets none, not the legacy pipeline's 3", async () => {
     const turns = Array.from({ length: 6 }, (_, i) => [call(`c${i}`, "look", { v: String(i) })]);

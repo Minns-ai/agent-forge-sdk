@@ -1,4 +1,4 @@
-import type { ContentBlock, LLMMessage } from "../types.js";
+import type { ContentBlock, LLMMessage, ToolResult } from "../types.js";
 
 /**
  * Multimodal content helpers — builders for {@link ContentBlock} values and the
@@ -44,6 +44,18 @@ export function pdfFromBase64(data: string, title?: string): ContentBlock {
     { type: "base64", mediaType: "application/pdf", data },
     title !== undefined ? { title } : undefined,
   );
+}
+
+/**
+ * A tool result as the message the model reads: its JSON (without `content`,
+ * which is not text) as the text, and its content blocks after it. A result
+ * with no blocks is the JSON string, exactly as before.
+ */
+export function toolResultContent(result: ToolResult, note?: string): string | ContentBlock[] {
+  const { content, ...rest } = result;
+  const text = JSON.stringify(note ? { ...rest, note } : rest);
+  if (!Array.isArray(content) || content.length === 0) return text;
+  return [textBlock(text), ...content.filter((b) => b && typeof b === "object")];
 }
 
 /**

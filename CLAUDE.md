@@ -306,6 +306,11 @@ declares its capabilities:
 - `defer` / `alwaysLoad` — progressive disclosure: a deferred schema is withheld from every model request until the model calls the synthetic `find_tools`; the AdaptiveRunner and SimpleAgent both keep a per-run disclosed set and refuse a deferred tool that has not been surfaced. `tests/pipeline/base-tokens.test.ts` budgets what a default agent costs before its first step
 - `tier: "inproc" | "sandbox" | "remote"` — first-party vs sandboxed/MCP tools
 
+A tool that has something for the model to see (a picture a browser took) puts it in
+`ToolResult.content` as content blocks: the runner sends the result's JSON and then the blocks
+as the tool message (`toolResultContent`), the Anthropic provider as the `tool_result`'s own
+content, OpenAI as placeholders. `result` stays the text the registry sizes and telemetry records.
+
 `ToolRegistry.execute` runs validate → authorize (policy + checkAccess + approval) →
 execute → result size-cap, and never throws.
 

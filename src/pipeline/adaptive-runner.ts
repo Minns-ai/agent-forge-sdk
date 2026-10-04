@@ -1,3 +1,4 @@
+import { toolResultContent } from "../llm/content.js";
 import type {
   Directive,
   LLMProvider,
@@ -1157,9 +1158,12 @@ export class AdaptiveRunner {
                 this.updateSessionFromResult(sessionState, toolCall.name, toolResult);
               }
 
+              // The result's JSON, and after it any content blocks the tool
+              // gave the model to see (a picture): providers that take blocks
+              // send them, others read their placeholders.
               messages.push({
                 role: "tool",
-                content: JSON.stringify(repeatedCalls.has(toolCall) ? { ...toolResult, note: REPEAT_NOTE } : toolResult),
+                content: toolResultContent(toolResult, repeatedCalls.has(toolCall) ? REPEAT_NOTE : undefined),
                 toolCallId: toolCall.id,
               });
 

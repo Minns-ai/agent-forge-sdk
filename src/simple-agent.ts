@@ -1,3 +1,5 @@
+import type { ContentBlock } from "./types.js";
+import { toolResultContent } from "./llm/content.js";
 import type {
   Directive,
   LLMProvider,
@@ -719,7 +721,7 @@ export class SimpleAgent {
       // EVERY tool_use id gets a result (even skipped/capped ones) so pairing holds.
       const batches = planToolBatches(response.toolCalls, (name) => this.toolRegistry.get(name));
       let capped = false;
-      const results = new Map<string, string>();
+      const results = new Map<string, string | ContentBlock[]>();
       const runOne = async (call: LLMToolCall): Promise<void> => {
         if (call.name === "find_tools") {
           const q = String((call.arguments as { query?: string }).query ?? "");
@@ -751,7 +753,7 @@ export class SimpleAgent {
         toolResults.push(result);
         toolCallCount++;
         if (result.denied) permissionDenials.push({ tool: call.name, reason: result.error ?? "denied" });
-        results.set(call.id, JSON.stringify(result));
+        results.set(call.id, toolResultContent(result));
       };
       for (const batch of batches) {
         if (batch.parallel) await Promise.all(batch.calls.map(runOne));
