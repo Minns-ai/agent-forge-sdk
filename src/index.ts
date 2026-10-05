@@ -200,7 +200,7 @@ export {
 export { AgentEventEmitter } from "./events/emitter.js";
 
 // ─── Pipeline ────────────────────────────────────────────────────────────────
-export { AdaptiveRunner } from "./pipeline/adaptive-runner.js";
+export { AdaptiveRunner, turnTextOf } from "./pipeline/adaptive-runner.js";
 export type { ExecutionTier } from "./pipeline/adaptive-runner.js";
 /** @deprecated Use AdaptiveRunner instead */
 export { PipelineRunner } from "./pipeline/runner.js";

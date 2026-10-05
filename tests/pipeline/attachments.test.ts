@@ -60,7 +60,8 @@ describe("AgentForge.run with attachments", () => {
     expect(captured.length).toBeGreaterThan(0);
     const userTurn = captured[0].find((m) => m.role === "user")!;
     expect(userTurn.content).toEqual([
-      { type: "text", text: "What do these show?" },
+      // The turn opens with the date (turnTextOf); the request follows.
+      { type: "text", text: expect.stringMatching(/^It is .+\n\nWhat do these show\?$/) },
       { type: "image", source: { type: "url", url: "https://x.test/a.png" } },
       {
         type: "document",
@@ -81,7 +82,7 @@ describe("AgentForge.run with attachments", () => {
     await agent.run("plain question", { sessionId: 2 });
 
     const userTurn = captured[0].find((m) => m.role === "user")!;
-    expect(userTurn.content).toBe("plain question");
+    expect(userTurn.content).toMatch(/^It is .+\n\nplain question$/);
   });
 
   it("persists text-only history: the next turn's transcript has no blocks", async () => {
@@ -104,7 +105,8 @@ describe("AgentForge.run with attachments", () => {
     const transcript = captured[0];
     const historyUser = transcript.filter((m) => m.role === "user");
     expect(historyUser[0].content).toBe("look at this image");
-    expect(historyUser[historyUser.length - 1].content).toBe("follow-up question");
+    // The current turn carries the date; what history keeps never does.
+    expect(historyUser[historyUser.length - 1].content).toMatch(/^It is .+\n\nfollow-up question$/);
     for (const m of transcript) {
       if (m !== transcript[transcript.length - 1]) {
         expect(typeof m.content).toBe("string");

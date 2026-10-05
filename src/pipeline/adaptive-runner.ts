@@ -105,6 +105,23 @@ function routeExecution(
   return "loop";
 }
 
+// ─── The turn ─────────────────────────────────────────────────────────────────
+
+/**
+ * What the model is handed for this turn: the date, what this run knows, and
+ * the request under a heading of its own. Without the date a scheduled agent
+ * guessed the day from its calendar (two different days on two runs); without
+ * the heading the request read as the last memory section, and a model
+ * answered "I'm ready to help" to a task it was given. It goes in the turn, not
+ * the system prompt, so the cached prefix stays the same. Pure.
+ */
+export function turnTextOf(runContext: string, message: string, now: Date = new Date()): string {
+  const day = new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(now);
+  const time = now.toISOString().slice(11, 16);
+  const when = `It is ${day}, ${time} UTC (${now.toISOString().slice(0, 10)}).`;
+  return runContext ? `${when}\n\n${runContext}\n\n## The request\n\n${message}` : `${when}\n\n${message}`;
+}
+
 // ─── System Prompt Builder ────────────────────────────────────────────────────
 
 /**
@@ -156,7 +173,7 @@ function buildAdaptiveSystemPrompt(params: {
   // Known facts
   const facts = sessionState.collectedFacts;
   if (facts && Object.keys(facts).length > 0) {
-    parts.push("\n## Known Facts\n");
+    parts.push("\n## Known Facts (from earlier runs, may be out of date)\n");
     for (const [key, value] of Object.entries(facts)) {
       parts.push(`- ${key}: ${value}`);
     }
@@ -164,7 +181,7 @@ function buildAdaptiveSystemPrompt(params: {
 
   // Memory claims (if any were pre-loaded by graph pipeline)
   if (claims.length > 0) {
-    parts.push("\n## Relevant Memory\n");
+    parts.push("\n## Relevant Memory (from earlier runs, may be out of date)\n");
     const topClaims = claims.slice(0, 15);
     for (const claim of topClaims) {
       const conf = claim.similarity ? ` (${(claim.similarity * 100).toFixed(0)}%)` : "";
@@ -174,6 +191,12 @@ function buildAdaptiveSystemPrompt(params: {
         parts.push(`- ${claim.text}${conf}`);
       }
     }
+  }
+
+  // Remembered words are not the world now: a fact that a tool or service is
+  // down kept an agent from even trying it, run after run, long after it was up.
+  if ((facts && Object.keys(facts).length > 0) || claims.length > 0) {
+    parts.push("\nWhat you remember can be stale. Anything above saying a tool or service is down or failing: try it before you believe it.");
   }
 
   // Reflexion constraints
@@ -935,7 +958,7 @@ export class AdaptiveRunner {
     // a text block for the message plus the caller-supplied content blocks.
     // What this run knows comes first, in the same turn (not the history).
     const attachments = pipelineState.attachments;
-    const turnText = runContext ? `${runContext}\n\n${message}` : message;
+    const turnText = turnTextOf(runContext, message);
     messages.push(
       attachments?.length
         ? { role: "user", content: [{ type: "text", text: turnText }, ...attachments] }
