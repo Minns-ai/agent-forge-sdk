@@ -286,14 +286,15 @@ function disclosedNames(registry: ToolRegistry): Set<string> {
  * default runner offered every tool on every request regardless, so the
  * promise held only in SimpleAgent.
  */
-function buildToolSpecs(registry: ToolRegistry, disclosed?: Set<string>): LLMToolSpec[] {
+function buildToolSpecs(registry: ToolRegistry, disclosed?: Set<string>, startedWith?: Set<string>): LLMToolSpec[] {
   const all = registry.definitions();
   // What the run started with, in registry order, then what find_tools
   // surfaced, in the order it did. Surfaced tools used to be slotted in among
   // the others, which changed the request from that point on and so missed
   // the prompt cache for every tool after it, the system prompt and the whole
-  // conversation.
-  const initial = disclosedNames(registry);
+  // conversation. The run passes the list it started with (`startedWith`), so a
+  // tool that became alwaysLoad mid-run is appended too, not slotted in.
+  const initial = startedWith ?? disclosedNames(registry);
   const own = disclosed ? all.filter((t) => initial.has(t.name) && disclosed.has(t.name)) : all;
   const surfaced = disclosed
     ? [...disclosed].filter((n) => !initial.has(n)).map((n) => all.find((t) => t.name === n)).filter((t): t is ToolDefinition => !!t)
@@ -925,7 +926,8 @@ export class AdaptiveRunner {
     // Which schemas the model can see. Grows when it calls find_tools; the
     // specs are rebuilt from it after every such call.
     const disclosed = disclosedNames(this.toolRegistry);
-    let toolSpecs = buildToolSpecs(this.toolRegistry, disclosed);
+    const startedWith = new Set(disclosed);
+    let toolSpecs = buildToolSpecs(this.toolRegistry, disclosed, startedWith);
     const withheld = (): number => this.toolRegistry.definitions().filter((t) => !disclosed.has(t.name)).length;
     const toolContext: ToolContext = pipelineState.toolContext;
     const goalProgress = pipelineState.goalProgress;
@@ -1047,6 +1049,16 @@ export class AdaptiveRunner {
           // compaction uses a token estimate; the call below adds a REACTIVE net
           // that shrinks harder if the provider still rejects it as too long.
           messages = compactMessages(messages);
+          // A deferred tool whose alwaysLoad has turned true since the run
+          // began joins the model's view now, as find_tools would have put
+          // it there: a host decides mid-run that the run needs a group (it
+          // searched the web, so it will want the browser) by flipping the
+          // flag, and the schema is on the next request, with no round trip.
+          const nowLoaded = this.toolRegistry.definitions().filter((t) => !disclosed.has(t.name) && t.alwaysLoad === true);
+          if (nowLoaded.length > 0) {
+            for (const t of nowLoaded) disclosed.add(t.name);
+            toolSpecs = buildToolSpecs(this.toolRegistry, disclosed, startedWith);
+          }
           const recovered = await this.completeWithToolsRecovering(messages, toolSpecs, toolModelCall, onDelta, undefined, promptFor);
           messages = recovered.messages;
           const response = recovered.response;
@@ -1119,7 +1131,7 @@ export class AdaptiveRunner {
                 const query = String((tc.arguments as { query?: unknown })?.query ?? "");
                 const matches = this.toolRegistry.search(query).filter((t) => !disclosed.has(t.name));
                 for (const m of matches) disclosed.add(m.name);
-                toolSpecs = buildToolSpecs(this.toolRegistry, disclosed);
+                toolSpecs = buildToolSpecs(this.toolRegistry, disclosed, startedWith);
                 allReasoning.push(`find_tools("${query}"): ${matches.length} loaded`);
                 slots[i] = {
                   toolCall: tc,
