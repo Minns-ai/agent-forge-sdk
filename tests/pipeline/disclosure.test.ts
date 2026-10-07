@@ -87,6 +87,39 @@ describe("progressive disclosure in the default runner", () => {
     expect(result.reasoning.join("\n")).toContain('find_tools("pdf invoice"): 1 loaded');
   });
 
+  it("attaches a deferred tool whose alwaysLoad turns true mid-run, before the next model call", async () => {
+    // The host decides during the run that the browser is wanted (the model
+    // searched the web): it flips alwaysLoad, and the schema is on the next
+    // request without a find_tools round trip.
+    executed.length = 0;
+    let wanted = false;
+    const browser = tool("browser", "the browser", { defer: true, tags: ["browser"] });
+    Object.defineProperty(browser, "alwaysLoad", { enumerable: true, get: () => wanted });
+    // The search's own run is where the host learns the run is on the web.
+    const search = buildTool({
+      name: "web_search",
+      description: "search the web",
+      effect: "read",
+      parameters: {},
+      async execute() {
+        executed.push("web_search");
+        wanted = true;
+        return { success: true, result: "ok" };
+      },
+    });
+    const { llm, offered } = scripted([
+      () => ({ content: null, toolCalls: [call("1", "web_search")], stopReason: "tool_use" }),
+      () => ({ content: null, toolCalls: [call("2", "browser")], stopReason: "tool_use" }),
+      () => end("browsed"),
+    ]);
+    const agent = new AgentForge({ directive: { identity: "T", goalDescription: "g" }, llm, agentId: 1, tools: [search, browser, pdf] });
+    const result = await agent.run("find a hotel", { sessionId: 1 });
+    expect(offered[0]).toEqual(["web_search", "find_tools"]);
+    expect(offered[1]).toEqual(["web_search", "find_tools", "browser"]);
+    expect(executed).toEqual(["web_search", "browser"]);
+    expect(result.message).toBe("browsed");
+  });
+
   it("refuses a deferred tool the model has not surfaced, without running it", async () => {
     executed.length = 0;
     let told = "";
